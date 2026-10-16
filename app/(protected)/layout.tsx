@@ -3,20 +3,14 @@ import {
   UserButton,
 } from "@clerk/nextjs";
 import { auth } from "@clerk/nextjs/server";
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import { ThemeControl } from "@/components/theme-control";
 
-export const instant = false;
 
 export default async function ProtectedLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const { isAuthenticated, orgId, orgSlug } = await auth();
-
-  if (!isAuthenticated) {
-    redirect("/sign-in");
-  }
+  const { orgId, orgSlug } = await auth();
 
   if (!orgId) {
     return (
