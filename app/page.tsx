@@ -9,7 +9,6 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { ThemeControl } from "@/components/theme-control";
 
-export const instant = false;
 
 export default async function Home() {
   const { isAuthenticated } = await auth();
