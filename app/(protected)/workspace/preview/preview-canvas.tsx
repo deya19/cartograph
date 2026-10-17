@@ -39,6 +39,7 @@ type ModuleNodeData = {
   selection: Selection;
   hover: Hover;
   categoryByFile: ReadonlyMap<string, FileCategory>;
+  activeCategory: FileCategory | null;
   onToggle: (group: GraphGroup, opening: boolean) => void;
   onSelectFile: (path: string) => void;
   onScroll: (group: GraphGroup, delta: number) => void;
@@ -124,7 +125,7 @@ function layoutNodes(
 const handleStyle = { width: 6, height: 6, opacity: 0, border: "none" };
 
 function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
-  const { item, lit, dim, selection, hover, categoryByFile, onToggle, onSelectFile, onScroll, onHover } = data;
+  const { item, lit, dim, selection, hover, categoryByFile, activeCategory, onToggle, onSelectFile, onScroll, onHover } = data;
   const group = item.group;
 
   // Opening and scrolling swap the handle set without resizing the node, and
@@ -145,6 +146,8 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
     categoryCounts.set(category.name, entry);
   }
   const strip = [...categoryCounts.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const inCategory = (file: string) => activeCategory === null || categoryByFile.get(file)?.name === activeCategory.name;
+  const matchCount = activeCategory === null ? 0 : group.files.filter((file) => categoryByFile.get(file)?.name === activeCategory.name).length;
 
   if (item.kind === "module") {
     const hovered =
@@ -165,6 +168,12 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
           <span className="block shrink-0 font-mono text-[10px] leading-[14px] text-(--text)">
             in {group.fanIn} · out {group.fanOut}
           </span>
+          {activeCategory !== null ? (
+            <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] leading-[14px] text-(--text-muted)">
+              <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: activeCategory.color }} />
+              {matchCount} match
+            </span>
+          ) : null}
           <span className="absolute inset-x-0 bottom-0 flex h-[3px]">
             {strip.map(([name, { color, count }]) => (
               <span
@@ -180,8 +189,12 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
   }
 
   // A dimmed panel already fades as a whole; rows must not dim again on top.
-  const rowLit = (file: string) => (!dim && lit !== null && !lit.has(file) ? "opacity-20" : "");
-  const lineLit = (files: string[]) => dim || lit === null || files.some((file) => lit.has(file));
+  // Category and selection dimming compose by OR — a row lights up only when
+  // neither rule dims it.
+  const rowLit = (file: string) =>
+    !dim && ((lit !== null && !lit.has(file)) || !inCategory(file)) ? "opacity-20" : "";
+  const lineLit = (files: string[]) =>
+    dim || ((lit === null || files.some((file) => lit.has(file))) && (activeCategory === null || files.some(inCategory)));
   const rowCentre = (index: number) => PANEL_HEADER_HEIGHT + index * PANEL_ROW_HEIGHT + PANEL_ROW_HEIGHT / 2;
   const panelSelected = selection?.kind === "module" && selection.id === item.id;
   // When overflowing, the "above" cap occupies the first line slot.
@@ -213,6 +226,12 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
           <span className="block truncate font-mono text-xs font-semibold text-(--text-strong)">{group.label}</span>
           <span className="block font-mono text-[10px] text-(--text-muted)">
             {group.files.length} files · in {group.fanIn} · out {group.fanOut}
+            {activeCategory !== null ? (
+              <>
+                {" · "}
+                <span className="inline-block size-1.5 rounded-full" style={{ backgroundColor: activeCategory.color }} /> {matchCount} match
+              </>
+            ) : null}
           </span>
         </span>
         <span className="ml-2 shrink-0 font-mono text-[10px] text-(--text-muted)">close</span>
@@ -290,10 +309,11 @@ function AttachmentHandles({ suffix, top }: { suffix?: string; top?: number }) {
 
 const nodeTypes = { module: ModuleNode };
 
-function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover, categoryByFile, offsets, onToggle, onSelectFile, onScroll, onClearSelection, onHover }: {
+function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover, categoryByFile, activeCategory, offsets, onToggle, onSelectFile, onScroll, onClearSelection, onHover }: {
   result: ParseResult;
   groups: GraphGroup[];
   categoryByFile: ReadonlyMap<string, FileCategory>;
+  activeCategory: FileCategory | null;
   expanded: ReadonlySet<string>;
   expandedVersion: number;
   selection: Selection;
@@ -344,7 +364,11 @@ function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover
     () =>
       items.map((item) => {
         const position = positions.get(item.id) ?? { x: 0, y: 0, width: 0, height: 0 };
-        const dim = highlight !== null && !item.group.files.some((file) => highlight.lit.has(file));
+        // Selection and category dimming compose by OR; a node is dimmed when
+        // either rule finds nothing inside it.
+        const dim =
+          (highlight !== null && !item.group.files.some((file) => highlight.lit.has(file))) ||
+          (activeCategory !== null && !item.group.files.some((file) => categoryByFile.get(file)?.name === activeCategory.name));
         return {
           id: item.id,
           type: "module" as const,
@@ -357,20 +381,26 @@ function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover
           // Above every edge layer (edges use 0 and 1), so lines pass behind
           // open panels instead of across their rows.
           zIndex: 2,
-          data: { item, lit: highlight?.lit ?? null, dim, selection, hover, categoryByFile, onToggle, onSelectFile, onScroll, onHover },
+          data: { item, lit: highlight?.lit ?? null, dim, selection, hover, categoryByFile, activeCategory, onToggle, onSelectFile, onScroll, onHover },
         };
       }),
-    [items, positions, highlight, selection, hover, categoryByFile, onToggle, onSelectFile, onScroll, onHover],
+    [items, positions, highlight, selection, hover, categoryByFile, activeCategory, onToggle, onSelectFile, onScroll, onHover],
   );
 
   const flowEdges = useMemo<FlowEdge[]>(
     () =>
       edges.map((edge) => {
-        const dimmed =
+        const unselected =
           highlight !== null && !edge.files.some((file) => highlight.selected.has(file.from) || highlight.selected.has(file.to));
+        const outsideCategory =
+          activeCategory !== null &&
+          !edge.files.some(
+            (file) => categoryByFile.get(file.from)?.name === activeCategory.name || categoryByFile.get(file.to)?.name === activeCategory.name,
+          );
+        const dimmed = unselected || outsideCategory;
         // Direction reads against the selection: green flows into it, amber out
         // of it. Coloured edges paint above the dimmed grey ones.
-        const active = highlight !== null && !dimmed;
+        const active = highlight !== null && !unselected;
         const outgoing =
           highlight !== null && edge.files.some((file) => highlight.selected.has(file.from));
         const color = active ? (outgoing ? OUTGOING_EDGE_COLOR : INCOMING_EDGE_COLOR) : EDGE_COLOR;
@@ -390,7 +420,7 @@ function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover
           markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: markerColor },
         };
       }),
-    [edges, highlight, hex],
+    [edges, highlight, hex, activeCategory, categoryByFile],
   );
 
   // Refit only after React Flow holds the post-change nodes; the zoom cap means
@@ -433,6 +463,9 @@ export function PreviewCanvas({ result }: PreviewCanvasProps) {
   const [selection, setSelection] = useState<Selection>(null);
   const [hover, setHover] = useState<Hover>(null);
   const [detailsTab, setDetailsTab] = useState<DetailsTab>("structure");
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  // Lives here rather than in the summary so selecting a file doesn't lose it.
+  const [insightsOpen, setInsightsOpen] = useState(false);
   const [expandedVersion, setExpandedVersion] = useState(0);
   const [offsets, setOffsets] = useState<ReadonlyMap<string, number>>(new Map());
 
@@ -499,6 +532,8 @@ export function PreviewCanvas({ result }: PreviewCanvasProps) {
 
   const handleClearSelection = useCallback(() => setSelection(null), []);
 
+  const activeCategoryRecord = categories.find((category) => category.name === activeCategory) ?? null;
+
   return (
     <main className="flex min-h-[calc(100vh-65px)] min-w-230 flex-col">
       <header className="flex items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
@@ -517,19 +552,25 @@ export function PreviewCanvas({ result }: PreviewCanvasProps) {
           </div>
           <div className="space-y-1 px-3 py-3">
             {categories.map((category) => (
-              <div className="flex items-center justify-between gap-2 px-1 py-1.5" key={category.name}>
+              <button
+                className={`flex w-full items-center justify-between gap-2 px-1 py-1.5 text-left hover:bg-(--row-hover) ${activeCategory === category.name ? "bg-(--row-hover) shadow-[inset_2px_0_0_var(--select)]" : ""}`}
+                key={category.name}
+                type="button"
+                onClick={() => setActiveCategory((current) => (current === category.name ? null : category.name))}
+              >
                 <span className="flex min-w-0 items-center gap-2">
                   <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: category.color }} />
                   <span className="truncate font-mono text-[10px] text-zinc-600 dark:text-zinc-300">{category.name}</span>
                 </span>
                 <span className="font-mono text-[10px] text-zinc-400">{category.count}</span>
-              </div>
+              </button>
             ))}
           </div>
         </aside>
         <section aria-label="Map canvas" className="min-h-0 min-w-0 bg-(--canvas)">
           <ReactFlowProvider>
             <MapCanvas
+              activeCategory={activeCategoryRecord}
               categoryByFile={categoryByFile}
               expanded={expanded}
               expandedVersion={expandedVersion}
@@ -549,9 +590,11 @@ export function PreviewCanvas({ result }: PreviewCanvasProps) {
         <DetailPane
           groups={groups}
           hover={hover}
+          insightsOpen={insightsOpen}
           onHover={setHover}
           onRevealFile={handleRevealFile}
           onTabChange={setDetailsTab}
+          onToggleInsights={() => setInsightsOpen((open) => !open)}
           result={result}
           selection={selection}
           tab={detailsTab}

@@ -313,6 +313,197 @@ export function repositorySummary(
   return { mostImported, unimported: unimportedFiles.slice(0, limit), unimportedTotal: unimportedFiles.length };
 }
 
+export type Adjacency = {
+  dependents: ReadonlyMap<string, readonly string[]>;
+  dependencies: ReadonlyMap<string, readonly string[]>;
+};
+
+export function buildAdjacency(edges: Edge[]): Adjacency {
+  const dependents = new Map<string, Set<string>>();
+  const dependencies = new Map<string, Set<string>>();
+  for (const edge of edges) {
+    const dep = dependents.get(edge.to) ?? new Set<string>();
+    dep.add(edge.from);
+    dependents.set(edge.to, dep);
+    const req = dependencies.get(edge.from) ?? new Set<string>();
+    req.add(edge.to);
+    dependencies.set(edge.from, req);
+  }
+  const sorted = (map: Map<string, Set<string>>) =>
+    new Map([...map.entries()].map(([key, value]) => [key, [...value].sort()]));
+  return { dependents: sorted(dependents), dependencies: sorted(dependencies) };
+}
+
+export function transitiveWalk(
+  adjacency: Adjacency,
+  start: string,
+  direction: "dependents" | "dependencies",
+  depth = 2,
+): Array<{ path: string; depth: number }> {
+  // Depth 2 by default: deeper reaches most of a real repository and stops
+  // being an answer.
+  const neighbours = adjacency[direction];
+  const seen = new Set([start]);
+  const found: Array<{ path: string; depth: number }> = [];
+  let frontier = [start];
+  for (let level = 1; level <= depth && frontier.length > 0; level += 1) {
+    const next: string[] = [];
+    for (const node of frontier) {
+      for (const neighbour of neighbours.get(node) ?? []) {
+        if (seen.has(neighbour)) continue;
+        seen.add(neighbour);
+        found.push({ path: neighbour, depth: level });
+        next.push(neighbour);
+      }
+    }
+    frontier = next;
+  }
+  return found.sort((left, right) => left.depth - right.depth || left.path.localeCompare(right.path));
+}
+
+export const LONG_FILE_LINES = 500;
+
+export const INSIGHT_SENTENCES = {
+  unimported: "Nothing in the repository imports this file.",
+  heavilyImported: "Imported by far more files than most.",
+  cycles: "These files import each other in a loop.",
+  long: `This file is over ${LONG_FILE_LINES} lines.`,
+} as const;
+
+export type Insights = {
+  unimported: string[];
+  unimportedReached: number;
+  heavilyImported: Array<{ path: string; importers: number }>;
+  cycles: Array<{ files: string[]; groupSize: number }>;
+  long: Array<{ path: string; lines: number }>;
+};
+
+// Iterative Tarjan: a real repository's import graph is deep enough to blow
+// the call stack, so the recursion stays explicit.
+function stronglyConnected(files: FileRecord[], dependencies: ReadonlyMap<string, readonly string[]>): string[][] {
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const components: string[][] = [];
+  let counter = 0;
+
+  for (const file of files) {
+    if (index.has(file.path)) continue;
+    const work: Array<{ node: string; child: number }> = [{ node: file.path, child: 0 }];
+    while (work.length > 0) {
+      const frame = work[work.length - 1];
+      const node = frame.node;
+      if (frame.child === 0) {
+        index.set(node, counter);
+        low.set(node, counter);
+        counter += 1;
+        stack.push(node);
+        onStack.add(node);
+      }
+      const neighbours = dependencies.get(node) ?? [];
+      if (frame.child < neighbours.length) {
+        const next = neighbours[frame.child];
+        frame.child += 1;
+        if (!index.has(next)) {
+          work.push({ node: next, child: 0 });
+        } else if (onStack.has(next)) {
+          low.set(node, Math.min(low.get(node) ?? 0, index.get(next) ?? 0));
+        }
+      } else {
+        work.pop();
+        const parent = work.at(-1);
+        if (parent) low.set(parent.node, Math.min(low.get(parent.node) ?? 0, low.get(node) ?? 0));
+        if (low.get(node) === index.get(node)) {
+          const component: string[] = [];
+          let member = "";
+          do {
+            member = stack.pop() ?? "";
+            onStack.delete(member);
+            component.push(member);
+          } while (member !== node);
+          components.push(component);
+        }
+      }
+    }
+  }
+  return components;
+}
+
+// Shortest way back to start inside the component: BFS with neighbours in
+// sorted order keeps the reported cycle deterministic.
+function cycleThrough(start: string, members: ReadonlySet<string>, dependencies: ReadonlyMap<string, readonly string[]>): string[] {
+  const previous = new Map<string, string>();
+  const seen = new Set([start]);
+  const queue = [start];
+  while (queue.length > 0) {
+    const node = queue.shift() ?? "";
+    const neighbours = [...(dependencies.get(node) ?? [])].sort();
+    for (const next of neighbours) {
+      if (!members.has(next)) continue;
+      if (next === start) {
+        const path = [node];
+        let cursor = node;
+        while (previous.has(cursor)) {
+          cursor = previous.get(cursor) ?? cursor;
+          path.unshift(cursor);
+        }
+        return path;
+      }
+      if (seen.has(next)) continue;
+      seen.add(next);
+      previous.set(next, node);
+      queue.push(next);
+    }
+  }
+  return [start];
+}
+
+export function insights(files: FileRecord[], edges: Edge[]): Insights {
+  const adjacency = buildAdjacency(edges);
+
+  const importers = new Map<string, number>();
+  for (const file of files) importers.set(file.path, 0);
+  for (const [path, sources] of adjacency.dependents) {
+    if (importers.has(path)) importers.set(path, sources.length);
+  }
+
+  const noImporters = files.filter((file) => (importers.get(file.path) ?? 0) === 0);
+  // A role means the framework, config or test runner reaches the file, so
+  // zero importers says nothing about whether it's used.
+  const unimported = noImporters.filter((file) => file.role === null).map((file) => file.path).sort();
+  const unimportedReached = noImporters.length - unimported.length;
+
+  const counts = files.map((file) => importers.get(file.path) ?? 0);
+  const mean = counts.reduce((sum, count) => sum + count, 0) / Math.max(1, counts.length);
+  const variance = counts.reduce((sum, count) => sum + (count - mean) ** 2, 0) / Math.max(1, counts.length);
+  const threshold = mean + 2 * Math.sqrt(variance);
+  const heavilyImported = files
+    .filter((file) => (importers.get(file.path) ?? 0) > threshold)
+    .map((file) => ({ path: file.path, importers: importers.get(file.path) ?? 0 }))
+    .sort((left, right) => right.importers - left.importers || left.path.localeCompare(right.path));
+
+  const selfEdge = new Set<string>();
+  for (const edge of edges) {
+    if (edge.from === edge.to) selfEdge.add(edge.from);
+  }
+  const cycles = stronglyConnected(files, adjacency.dependencies)
+    .filter((component) => component.length > 1 || selfEdge.has(component[0]))
+    .map((component) => {
+      const members = new Set(component);
+      const start = [...component].sort()[0];
+      return { files: cycleThrough(start, members, adjacency.dependencies), groupSize: component.length };
+    })
+    .sort((left, right) => right.groupSize - left.groupSize || (left.files[0] ?? "").localeCompare(right.files[0] ?? ""));
+
+  const long = files
+    .filter((file) => file.lines > LONG_FILE_LINES)
+    .map((file) => ({ path: file.path, lines: file.lines }))
+    .sort((left, right) => right.lines - left.lines || left.path.localeCompare(right.path));
+
+  return { unimported, unimportedReached, heavilyImported, cycles, long };
+}
+
 export function graphAcceptance(result: ParseResult, groups: GraphGroup[]): { nodeCount: number; allNodesHaveMultipleFiles: boolean; danglingEdges: number } {
   const files = new Set(groups.flatMap((group) => group.files));
   const danglingEdges = result.edges.filter((edge) => !files.has(edge.from) || !files.has(edge.to)).length;

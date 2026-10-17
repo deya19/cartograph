@@ -2,6 +2,8 @@ export type EdgeKind = "import" | "re-export" | "dynamic-import";
 
 export type CoverageStatus = "resolved" | "outside" | "excluded" | "unresolved";
 
+export type FileRole = "page" | "layout" | "route" | "middleware" | "framework file" | "config" | "test";
+
 export type FileRecord = {
   path: string;
   directory: string;
@@ -9,6 +11,7 @@ export type FileRecord = {
   extension: string;
   lines: number;
   sha256: string;
+  role: FileRole | null;
 };
 
 export type Edge = {
