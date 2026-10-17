@@ -1,8 +1,19 @@
 "use client";
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { fileCategories, fileCategory, type Hover, type Selection } from "./file-category";
-import { fileNeighbours, repositorySummary, type GraphGroup, type Neighbour } from "@/lib/graph";
+import {
+  buildAdjacency,
+  fileNeighbours,
+  insights,
+  INSIGHT_SENTENCES,
+  repositorySummary,
+  transitiveWalk,
+  type Adjacency,
+  type GraphGroup,
+  type Insights,
+  type Neighbour,
+} from "@/lib/graph";
 import type { ParseResult } from "@/lib/parser/types";
 
 export type DetailsTab = "structure" | "explanation";
@@ -16,6 +27,8 @@ type DetailPaneProps = {
   onTabChange: (tab: DetailsTab) => void;
   onHover: (hover: Hover) => void;
   onRevealFile: (path: string) => void;
+  insightsOpen: boolean;
+  onToggleInsights: () => void;
 };
 
 function Stat({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
@@ -94,14 +107,83 @@ function basename(root: string): string {
   return root.split(/[\\/]/).filter(Boolean).at(-1) ?? root;
 }
 
-function RepositorySummary({ result, highlighted, onHover, onRevealFile }: {
-  result: ParseResult;
+function InsightsPanel({ data, highlighted, onHover, onRevealFile }: {
+  data: Insights;
   highlighted: (path: string) => boolean;
   onHover: (hover: Hover) => void;
   onRevealFile: (path: string) => void;
 }) {
+  return (
+    <div className="mt-1">
+      <SectionHeading>Unimported · {data.unimported.length}</SectionHeading>
+      <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">{INSIGHT_SENTENCES.unimported}</p>
+      {data.unimported.map((path) => (
+        <PathRow key={path} highlighted={highlighted(path)} onHover={onHover} onRevealFile={onRevealFile} path={path} />
+      ))}
+      <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">
+        {data.unimportedReached} files reached by the framework, config or test runner not listed
+      </p>
+
+      <SectionHeading>Heavily imported · {data.heavilyImported.length}</SectionHeading>
+      <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">{INSIGHT_SENTENCES.heavilyImported}</p>
+      {data.heavilyImported.map((entry) => (
+        <PathRow
+          key={entry.path}
+          highlighted={highlighted(entry.path)}
+          onHover={onHover}
+          onRevealFile={onRevealFile}
+          path={entry.path}
+          trailing={entry.importers}
+        />
+      ))}
+
+      <SectionHeading>Import cycles · {data.cycles.length}</SectionHeading>
+      <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">{INSIGHT_SENTENCES.cycles}</p>
+      {data.cycles.map((cycle, index) => (
+        <div className="mt-1" key={cycle.files.join("\0")}>
+          {cycle.files.map((path, fileIndex) => (
+            <div key={path}>
+              {fileIndex > 0 ? <p className="px-1 font-mono text-[10px] leading-3 text-(--text-faint)">→</p> : null}
+              <PathRow highlighted={highlighted(path)} onHover={onHover} onRevealFile={onRevealFile} path={path} />
+            </div>
+          ))}
+          {cycle.groupSize > cycle.files.length ? (
+            <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">loop group of {cycle.groupSize} files</p>
+          ) : null}
+          {index < data.cycles.length - 1 ? <div className="my-1 border-t border-(--node-divider)" /> : null}
+        </div>
+      ))}
+
+      <SectionHeading>Long files · {data.long.length}</SectionHeading>
+      <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">{INSIGHT_SENTENCES.long}</p>
+      {data.long.map((entry) => (
+        <PathRow
+          key={entry.path}
+          highlighted={highlighted(entry.path)}
+          onHover={onHover}
+          onRevealFile={onRevealFile}
+          path={entry.path}
+          trailing={entry.lines}
+        />
+      ))}
+    </div>
+  );
+}
+
+function RepositorySummary({ result, highlighted, onHover, onRevealFile, insightsOpen, onToggleInsights }: {
+  result: ParseResult;
+  highlighted: (path: string) => boolean;
+  onHover: (hover: Hover) => void;
+  onRevealFile: (path: string) => void;
+  insightsOpen: boolean;
+  onToggleInsights: () => void;
+}) {
   const summary = useMemo(() => repositorySummary(result.files, result.edges), [result.files, result.edges]);
+  const insightData = useMemo(() => insights(result.files, result.edges), [result.files, result.edges]);
   const moreUnimported = summary.unimportedTotal - summary.unimported.length;
+  // Files no convention recognised — the rest are reached by the framework,
+  // a config loader or a test runner rather than by an import.
+  const unidentified = result.files.filter((file) => file.role === null).length;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
@@ -112,9 +194,7 @@ function RepositorySummary({ result, highlighted, onHover, onRevealFile }: {
         <Stat label="Files" value={result.files.length} />
         <Stat label="Imports" value={`${result.coverage.resolved} resolved / ${result.coverage.total} found`} />
         <Stat label="Routes" title="No adapter recovered routes" value="—" />
-        {/* FileRecord carries no convention role yet and the fallback adapter
-            identifies none, so every file counts as unidentified. */}
-        <Stat label="Unidentified" value={result.files.length} />
+        <Stat label="Unidentified" value={unidentified} />
       </div>
 
       <SectionHeading>Most imported</SectionHeading>
@@ -147,14 +227,68 @@ function RepositorySummary({ result, highlighted, onHover, onRevealFile }: {
           <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">+{moreUnimported} more</p>
         ) : null}
       </div>
+
+      <button
+        className="mt-4 flex w-full items-baseline justify-between font-mono text-[10px] uppercase tracking-[0.18em] text-(--text-faint) hover:text-(--text-muted)"
+        type="button"
+        onClick={onToggleInsights}
+      >
+        <span>Insights</span>
+        <span>{insightsOpen ? "hide" : "show"}</span>
+      </button>
+      {insightsOpen ? (
+        <InsightsPanel data={insightData} highlighted={highlighted} onHover={onHover} onRevealFile={onRevealFile} />
+      ) : null}
     </div>
   );
 }
 
-function FileStructure({ path, result, groups, highlighted, onHover, onRevealFile }: {
+function WalkResults({ adjacency, path, direction, highlighted, onHover, onRevealFile }: {
+  adjacency: Adjacency;
+  path: string;
+  direction: "dependents" | "dependencies";
+  highlighted: (file: string) => boolean;
+  onHover: (hover: Hover) => void;
+  onRevealFile: (file: string) => void;
+}) {
+  const results = transitiveWalk(adjacency, path, direction);
+  const depths = [...new Set(results.map((entry) => entry.depth))].sort();
+  return (
+    <div className="mt-1">
+      <SectionHeading>
+        {direction === "dependents" ? "Blast radius" : "Dependency chain"} · {results.length}
+      </SectionHeading>
+      {results.length === 0 ? (
+        <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">none</p>
+      ) : (
+        depths.map((depth) => (
+          <div key={depth}>
+            <p className="px-1 pt-1 font-mono text-[10px] leading-4 text-(--text-faint)">
+              {depth} step{depth === 1 ? "" : "s"}
+            </p>
+            {results
+              .filter((entry) => entry.depth === depth)
+              .map((entry) => (
+                <PathRow
+                  key={entry.path}
+                  highlighted={highlighted(entry.path)}
+                  onHover={onHover}
+                  onRevealFile={onRevealFile}
+                  path={entry.path}
+                />
+              ))}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function FileStructure({ path, result, groups, adjacency, highlighted, onHover, onRevealFile }: {
   path: string;
   result: ParseResult;
   groups: GraphGroup[];
+  adjacency: Adjacency;
   highlighted: (file: string) => boolean;
   onHover: (hover: Hover) => void;
   onRevealFile: (file: string) => void;
@@ -162,6 +296,7 @@ function FileStructure({ path, result, groups, highlighted, onHover, onRevealFil
   const file = result.files.find((entry) => entry.path === path);
   const group = groups.find((entry) => entry.files.includes(path));
   const neighbours = useMemo(() => fileNeighbours(path, result.edges), [path, result.edges]);
+  const [walk, setWalk] = useState<"dependents" | "dependencies" | null>(null);
   if (!file) return null;
 
   const category = fileCategory(file.extension);
@@ -179,6 +314,34 @@ function FileStructure({ path, result, groups, highlighted, onHover, onRevealFil
         <Stat label="Lines" value={file.lines} />
         <Stat label="Folder" value={group?.label ?? "—"} title={group?.path} />
       </div>
+
+      <div className="mt-2 flex gap-1">
+        {(
+          [
+            ["dependents", "Blast radius"],
+            ["dependencies", "Dependency chain"],
+          ] as const
+        ).map(([direction, label]) => (
+          <button
+            className={`px-1.5 py-0.5 font-mono text-[10px] leading-4 ${walk === direction ? "bg-(--row-hover) text-(--text-strong) shadow-[inset_2px_0_0_var(--select)]" : "text-(--text-muted) hover:bg-(--row-hover)"}`}
+            key={direction}
+            type="button"
+            onClick={() => setWalk((current) => (current === direction ? null : direction))}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {walk !== null ? (
+        <WalkResults
+          adjacency={adjacency}
+          direction={walk}
+          highlighted={highlighted}
+          onHover={onHover}
+          onRevealFile={onRevealFile}
+          path={path}
+        />
+      ) : null}
 
       <SectionHeading>Imports {neighbours.imports.length}</SectionHeading>
       <NeighbourList
@@ -234,7 +397,10 @@ function ModuleStructure({ group, result }: { group: GraphGroup; result: ParseRe
   );
 }
 
-export function DetailPane({ result, groups, selection, hover, tab, onTabChange, onHover, onRevealFile }: DetailPaneProps) {
+export function DetailPane({ result, groups, selection, hover, tab, onTabChange, onHover, onRevealFile, insightsOpen, onToggleInsights }: DetailPaneProps) {
+  // The walk only reads edges, so one adjacency build makes every click
+  // synchronous — no spinner, no fetch.
+  const adjacency = useMemo(() => buildAdjacency(result.edges), [result.edges]);
   const highlighted = (path: string) =>
     (hover?.kind === "file" && hover.path === path) ||
     (hover?.kind === "module" && groups.find((group) => group.id === hover.id)?.files.includes(path) === true);
@@ -250,8 +416,10 @@ export function DetailPane({ result, groups, selection, hover, tab, onTabChange,
           </div>
           <RepositorySummary
             highlighted={highlighted}
+            insightsOpen={insightsOpen}
             onHover={onHover}
             onRevealFile={onRevealFile}
+            onToggleInsights={onToggleInsights}
             result={result}
           />
         </>
@@ -274,8 +442,11 @@ export function DetailPane({ result, groups, selection, hover, tab, onTabChange,
               <p className="px-1 font-mono text-[10px] leading-4 text-(--text-faint)">No explanation yet.</p>
             </div>
           ) : selection.kind === "file" ? (
+            // Keyed on path so the active walk resets with the selected file.
             <FileStructure
+              adjacency={adjacency}
               groups={groups}
+              key={selection.path}
               highlighted={highlighted}
               onHover={onHover}
               onRevealFile={onRevealFile}
