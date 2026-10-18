@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
-import { fallbackAdapter, type ParserAdapter } from "./adapter.ts";
+import { detectAdapter, type ParserAdapter } from "./adapter.ts";
 import type {
   Coverage,
   CoverageExample,
@@ -40,7 +40,7 @@ function isWithin(root: string, value: string): boolean {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-async function walk(root: string, current: string, skipped: Array<{ path: string; reason: string }>): Promise<FileEntry[]> {
+async function walk(root: string, current: string, skipped: Array<{ path: string; reason: string }>, allPaths: Set<string>): Promise<FileEntry[]> {
   const entries = await readdir(current, { withFileTypes: true });
   const files: FileEntry[] = [];
 
@@ -53,7 +53,7 @@ async function walk(root: string, current: string, skipped: Array<{ path: string
         skipped.push({ path: relativePath, reason: `excluded directory: ${entry.name}` });
         continue;
       }
-      files.push(...(await walk(root, absolutePath, skipped)));
+      files.push(...(await walk(root, absolutePath, skipped, allPaths)));
       continue;
     }
 
@@ -62,6 +62,10 @@ async function walk(root: string, current: string, skipped: Array<{ path: string
       continue;
     }
 
+    // Every regular file goes to allPaths — convention checks like "directory
+    // contains package.json" or "next.config exists" need files this parser
+    // will never parse.
+    allPaths.add(relativePath);
     if (supportedFile.test(entry.name)) {
       files.push({ absolutePath, relativePath });
     } else {
@@ -176,15 +180,17 @@ async function readPathAliases(root: string): Promise<PathAlias[]> {
   }
 }
 
-export async function parseRepository(repositoryPath: string, adapter: ParserAdapter = fallbackAdapter): Promise<ParseResult> {
+export async function parseRepository(repositoryPath: string, adapter?: ParserAdapter): Promise<ParseResult> {
   const root = path.resolve(repositoryPath);
   const rootDetails = await stat(root);
   if (!rootDetails.isDirectory()) throw new Error(`Repository path is not a directory: ${repositoryPath}`);
 
   const skipped: Array<{ path: string; reason: string }> = [];
-  const candidates = await walk(root, root, skipped);
+  const allPaths = new Set<string>();
+  const candidates = await walk(root, root, skipped, allPaths);
+  const resolvedAdapter = adapter ?? detectAdapter(allPaths);
   const entries = candidates.filter(({ relativePath }) => {
-    const include = adapter.shouldInclude(relativePath);
+    const include = resolvedAdapter.shouldInclude(relativePath);
     if (!include) skipped.push({ path: relativePath, reason: "excluded by parser adapter" });
     return include;
   });
@@ -213,7 +219,8 @@ export async function parseRepository(repositoryPath: string, adapter: ParserAda
     files.push({
       path: relativePath,
       directory: normalize(path.dirname(relativePath)) === "." ? "." : normalize(path.dirname(relativePath)),
-      module: adapter.moduleName(relativePath),
+      module: resolvedAdapter.moduleName(relativePath),
+      role: resolvedAdapter.role(relativePath, allPaths),
       extension: path.extname(relativePath),
       lines: lineCount(content),
       sha256: createHash("sha256").update(content).digest("hex"),
@@ -242,7 +249,7 @@ export async function parseRepository(repositoryPath: string, adapter: ParserAda
 
   return {
     root,
-    adapter: adapter.name,
+    adapter: resolvedAdapter.name,
     files,
     edges,
     metrics,
