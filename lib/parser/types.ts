@@ -1,3 +1,5 @@
+import type { ParserAdapter } from "./adapter.ts";
+
 export type EdgeKind = "import" | "re-export" | "dynamic-import";
 
 export type CoverageStatus = "resolved" | "outside" | "excluded" | "unresolved";
@@ -41,6 +43,14 @@ export type Coverage = {
 export type FileMetrics = {
   fanIn: number;
   fanOut: number;
+};
+
+export type Selection = {
+  root: string;
+  adapter: ParserAdapter;
+  entries: Array<{ absolutePath: string; relativePath: string }>;
+  skipped: Array<{ path: string; reason: string }>;
+  allPaths: ReadonlySet<string>;
 };
 
 export type ParseResult = {

@@ -134,6 +134,17 @@ function groupMetrics(groups: GroupSeed[], edges: ParseResult["edges"]): Map<str
   ]));
 }
 
+// Same counting as the parser's metrics: every edge row counts, not distinct
+// file pairs — one file pair can hold several import kinds.
+export function fileMetrics(files: FileRecord[], edges: Edge[]): Record<string, FileMetrics> {
+  const metrics: Record<string, FileMetrics> = Object.fromEntries(files.map((file) => [file.path, { fanIn: 0, fanOut: 0 }]));
+  for (const edge of edges) {
+    metrics[edge.from].fanOut += 1;
+    metrics[edge.to].fanIn += 1;
+  }
+  return metrics;
+}
+
 export function foldModules(result: ParseResult, maximumNodes = 24): GraphGroup[] {
   let threshold = 2;
   let groups = partitionAtThreshold(result.files, threshold);

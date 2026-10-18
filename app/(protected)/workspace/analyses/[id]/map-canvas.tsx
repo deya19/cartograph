@@ -15,7 +15,7 @@ import {
 import type { Edge as FlowEdge, Node, NodeProps } from "@xyflow/react";
 import { graphlib, layout } from "@dagrejs/dagre";
 import "@xyflow/react/dist/style.css";
-import type { ParseResult } from "@/lib/parser/types";
+import type { Coverage, ParseResult } from "@/lib/parser/types";
 import { useResolvedTheme } from "@/components/use-resolved-theme";
 import {
   PANEL_ROWS,
@@ -28,7 +28,7 @@ import {
 import { DetailPane, type DetailsTab } from "./detail-pane";
 import { fileCategories, fileCategory, type FileCategory, type Hover, type Selection } from "./file-category";
 
-type PreviewCanvasProps = {
+type MapCanvasProps = {
   result: ParseResult;
 };
 
@@ -194,7 +194,7 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
   const rowLit = (file: string) =>
     !dim && ((lit !== null && !lit.has(file)) || !inCategory(file)) ? "opacity-20" : "";
   const lineLit = (files: string[]) =>
-    dim || ((lit === null || files.some((file) => lit.has(file))) && (activeCategory === null || files.some(inCategory)));
+    dim || files.some((file) => (lit === null || lit.has(file)) && (activeCategory === null || inCategory(file)));
   const rowCentre = (index: number) => PANEL_HEADER_HEIGHT + index * PANEL_ROW_HEIGHT + PANEL_ROW_HEIGHT / 2;
   const panelSelected = selection?.kind === "module" && selection.id === item.id;
   // When overflowing, the "above" cap occupies the first line slot.
@@ -309,7 +309,7 @@ function AttachmentHandles({ suffix, top }: { suffix?: string; top?: number }) {
 
 const nodeTypes = { module: ModuleNode };
 
-function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover, categoryByFile, activeCategory, offsets, onToggle, onSelectFile, onScroll, onClearSelection, onHover }: {
+function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hover, categoryByFile, activeCategory, offsets, onToggle, onSelectFile, onScroll, onClearSelection, onHover }: {
   result: ParseResult;
   groups: GraphGroup[];
   categoryByFile: ReadonlyMap<string, FileCategory>;
@@ -452,7 +452,47 @@ function MapCanvas({ result, groups, expanded, expandedVersion, selection, hover
   );
 }
 
-export function PreviewCanvas({ result }: PreviewCanvasProps) {
+// Package and "outside the repo" imports aren't part of the in-repo figure:
+// the denominator is what the parser could in principle have resolved.
+function CoverageBanner({ coverage, skipped }: { coverage: Coverage; skipped: number }) {
+  const [open, setOpen] = useState(false);
+  const denominator = coverage.resolved + coverage.excluded + coverage.unresolved;
+  if (denominator === 0 || coverage.resolved === denominator) return null;
+  // floor, so a partial graph can never round up to 100%.
+  const percent = Math.floor((coverage.resolved / denominator) * 100);
+  const gaps = coverage.examples.filter((example) => example.status === "unresolved" || example.status === "excluded");
+
+  return (
+    <div className="border-b border-amber-500/40 bg-amber-500/10 px-5 py-2">
+      <button
+        className="flex w-full items-baseline justify-between gap-3 text-left font-mono text-[11px] leading-4 text-amber-700 dark:text-amber-300"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>
+          Partial graph · {percent}% of in-repo imports resolved · {coverage.unresolved} unresolved ·{" "}
+          {coverage.excluded} excluded · {skipped} files skipped
+        </span>
+        <span className="shrink-0 text-amber-600 dark:text-amber-400">{open ? "hide details" : "details"}</span>
+      </button>
+      {open ? (
+        <div className="mt-2">
+          {gaps.map((example) => (
+            <p className="font-mono text-[10px] leading-4 text-amber-800 dark:text-amber-200" key={`${example.from}${example.specifier}`}>
+              {example.from} → {example.specifier}
+              {example.reason ? ` — ${example.reason}` : ""}
+            </p>
+          ))}
+          <p className="mt-1 font-mono text-[10px] leading-4 text-amber-600 dark:text-amber-400">
+            {skipped} files skipped
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function MapCanvas({ result }: MapCanvasProps) {
   const groups = useMemo(() => foldModules(result), [result]);
   const categories = useMemo(() => fileCategories(result.files), [result.files]);
   const categoryByFile = useMemo(
@@ -538,12 +578,13 @@ export function PreviewCanvas({ result }: PreviewCanvasProps) {
     <main className="flex min-h-[calc(100vh-65px)] min-w-230 flex-col">
       <header className="flex items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-blue-600 dark:text-blue-400">Analysis preview</p>
+          <p className="font-mono text-xs font-semibold text-(--text-strong)">{result.root}</p>
           <p className="mt-1 font-mono text-xs text-zinc-500">
             {result.summary.filesParsed} files · {groups.length} modules · click a module to open
           </p>
         </div>
       </header>
+      <CoverageBanner coverage={result.coverage} skipped={result.skipped.length} />
       <div className="grid min-h-0 flex-1 grid-cols-[13rem_minmax(0,1fr)_17rem]">
         <aside className="flex min-h-0 flex-col border-r border-zinc-200 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/40">
           <div className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -569,7 +610,7 @@ export function PreviewCanvas({ result }: PreviewCanvasProps) {
         </aside>
         <section aria-label="Map canvas" className="min-h-0 min-w-0 bg-(--canvas)">
           <ReactFlowProvider>
-            <MapCanvas
+            <FlowCanvas
               activeCategory={activeCategoryRecord}
               categoryByFile={categoryByFile}
               expanded={expanded}
