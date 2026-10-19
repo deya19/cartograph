@@ -67,38 +67,39 @@ export async function startAnalysis(organizationId: string, url: string): Promis
 export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, message: string) => void): Promise<ParseResult> {
   const client = createPipelineClient();
 
-  const { data: analysisData, error: analysisError } = await client
-    .from("analyses")
-    .select("id, organization_id, project_id, status")
-    .eq("id", analysisId)
-    .single();
-  if (analysisError || !analysisData) throw new Error(`Analysis not found: ${analysisId}`);
-  const analysis = analysisData as { id: string; organization_id: string; project_id: string };
-
-  const { data: projectData, error: projectError } = await client
-    .from("projects")
-    .select("id, repository_url, name, default_branch")
-    .eq("id", analysis.project_id)
-    .single();
-  if (projectError || !projectData) throw new Error(`Project not found for analysis: ${analysisId}`);
-  const project = projectData as { id: string; repository_url: string; default_branch: string };
-
-  const parsed = parseGitHubUrl(project.repository_url);
-  if (!parsed) throw new Error(`Not a GitHub repository URL: ${project.repository_url}`);
-
-  // Stage is written before the work starts, so a dead process leaves the row
-  // pointing at where it died; a second write lands the finished message.
-  const mark = async (stage: Stage, message: string) => {
-    const { error } = await client
-      .from("analyses")
-      .update({ status: "running", stage, stage_message: message, stage_updated_at: new Date().toISOString() })
-      .eq("id", analysisId);
-    if (error) throw new Error(`Failed to update analysis stage: ${error.message}`);
-    onStage?.(stage, message);
-  };
-
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "cartograph-"));
+  let tempDir: string | undefined;
   try {
+    const { data: analysisData, error: analysisError } = await client
+      .from("analyses")
+      .select("id, organization_id, project_id, status")
+      .eq("id", analysisId)
+      .single();
+    if (analysisError || !analysisData) throw new Error(`Analysis not found: ${analysisId}`);
+    const analysis = analysisData as { id: string; organization_id: string; project_id: string };
+
+    const { data: projectData, error: projectError } = await client
+      .from("projects")
+      .select("id, repository_url, name, default_branch")
+      .eq("id", analysis.project_id)
+      .single();
+    if (projectError || !projectData) throw new Error(`Project not found for analysis: ${analysisId}`);
+    const project = projectData as { id: string; repository_url: string; default_branch: string };
+
+    const parsed = parseGitHubUrl(project.repository_url);
+    if (!parsed) throw new Error(`Not a GitHub repository URL: ${project.repository_url}`);
+
+    // Stage is written before the work starts, so a dead process leaves the row
+    // pointing at where it died; a second write lands the finished message.
+    const mark = async (stage: Stage, message: string) => {
+      const { error } = await client
+        .from("analyses")
+        .update({ status: "running", stage, stage_message: message, stage_updated_at: new Date().toISOString() })
+        .eq("id", analysisId);
+      if (error) throw new Error(`Failed to update analysis stage: ${error.message}`);
+      onStage?.(stage, message);
+    };
+
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "cartograph-"));
     await mark("fetching", `Downloading ${parsed.owner}/${parsed.repo} from GitHub`);
     const fetched = await fetchArchive(parsed.owner, parsed.repo, tempDir);
     const { error: projectUpdateError } = await client
@@ -157,7 +158,17 @@ export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, m
       if (error) throw new Error(`Failed to insert edges: ${error.message}`);
     }
 
-    const done = `Stored ${result.files.length} files and ${edgeRows.length} edges`;
+    const routeRows = result.routes.map((route) => {
+      const file = fileIds.get(route.file);
+      if (!file) throw new Error(`Stored files missing for route ${route.method} ${route.path} (${route.file})`);
+      return { organization_id: analysis.organization_id, analysis_id: analysisId, file_id: file, method: route.method, path: route.path };
+    });
+    for (let index = 0; index < routeRows.length; index += 1000) {
+      const { error } = await client.from("routes").insert(routeRows.slice(index, index + 1000));
+      if (error) throw new Error(`Failed to insert routes: ${error.message}`);
+    }
+
+    const done = `Stored ${result.files.length} files, ${edgeRows.length} edges and ${routeRows.length} routes`;
     const { error: completeError } = await client
       .from("analyses")
       .update({
@@ -193,7 +204,7 @@ export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, m
     }
     throw error;
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    if (tempDir) await rm(tempDir, { recursive: true, force: true });
   }
 }
 

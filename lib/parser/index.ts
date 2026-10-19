@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
-import { detectAdapter, type ParserAdapter } from "./adapter.ts";
+import { detectAdapter, type ParserAdapter, type ProjectContext } from "./adapters/index.ts";
 import type {
   Coverage,
   CoverageExample,
@@ -189,17 +190,24 @@ export async function selectFiles(repositoryPath: string, adapter?: ParserAdapte
   const skipped: Array<{ path: string; reason: string }> = [];
   const allPaths = new Set<string>();
   const candidates = await walk(root, root, skipped, allPaths);
-  const resolvedAdapter = adapter ?? detectAdapter(allPaths);
+  // Adapters read files the parser never parses (package.json, configs), so
+  // the context hands them a read limited to paths the walk actually saw.
+  const context: ProjectContext = {
+    allPaths,
+    readText: (relativePath) => (allPaths.has(relativePath) ? readFileSync(path.join(root, relativePath), "utf8") : undefined),
+  };
+  const resolvedAdapter = adapter ?? detectAdapter(context);
   const entries = candidates.filter(({ relativePath }) => {
     const include = resolvedAdapter.shouldInclude(relativePath);
     if (!include) skipped.push({ path: relativePath, reason: "excluded by parser adapter" });
     return include;
   });
-  return { root, adapter: resolvedAdapter, entries, skipped, allPaths };
+  return { root, adapter: resolvedAdapter, entries, skipped, allPaths, context };
 }
 
 export async function parseSelection(selection: Selection): Promise<ParseResult> {
-  const { root, adapter: resolvedAdapter, entries, skipped, allPaths } = selection;
+  const { root, adapter: resolvedAdapter, entries, skipped, context } = selection;
+  const run = resolvedAdapter.start(context);
   const included = new Set(entries.map(({ relativePath }) => relativePath));
   const aliases = await readPathAliases(root);
   const files: FileRecord[] = [];
@@ -222,17 +230,17 @@ export async function parseSelection(selection: Selection): Promise<ParseResult>
   for (const entry of entries) {
     const content = await readFile(entry.absolutePath, "utf8");
     const relativePath = entry.relativePath;
+    const sourceFile = ts.createSourceFile(relativePath, content, ts.ScriptTarget.Latest, true);
     files.push({
       path: relativePath,
       directory: normalize(path.dirname(relativePath)) === "." ? "." : normalize(path.dirname(relativePath)),
       module: resolvedAdapter.moduleName(relativePath),
-      role: resolvedAdapter.role(relativePath, allPaths),
+      role: run.inspect(relativePath, sourceFile),
       extension: path.extname(relativePath),
       lines: lineCount(content),
       sha256: createHash("sha256").update(content).digest("hex"),
     });
 
-    const sourceFile = ts.createSourceFile(relativePath, content, ts.ScriptTarget.Latest, true);
     for (const reference of collectImports(sourceFile)) {
       const resolution = await resolveFile(reference.specifier, entry.absolutePath, root, included, aliases);
       addCoverage(coverage, { from: relativePath, specifier: reference.specifier, kind: reference.kind, status: resolution.status, reason: resolution.reason });
@@ -253,11 +261,14 @@ export async function parseSelection(selection: Selection): Promise<ParseResult>
     metrics[edge.to].fanIn += 1;
   }
 
+  const routes = run.routes().sort((left, right) => left.path.localeCompare(right.path) || left.method.localeCompare(right.method) || left.file.localeCompare(right.file));
+
   return {
     root,
     adapter: resolvedAdapter.name,
     files,
     edges,
+    routes,
     metrics,
     coverage,
     skipped,
@@ -274,5 +285,5 @@ export async function parseRepository(repositoryPath: string, adapter?: ParserAd
   return parseSelection(await selectFiles(repositoryPath, adapter));
 }
 
-export type { ParserAdapter } from "./adapter.ts";
+export type { ParserAdapter } from "./adapters/index.ts";
 export type * from "./types.ts";

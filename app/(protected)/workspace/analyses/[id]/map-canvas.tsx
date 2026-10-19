@@ -16,6 +16,7 @@ import type { Edge as FlowEdge, Node, NodeProps } from "@xyflow/react";
 import { graphlib, layout } from "@dagrejs/dagre";
 import "@xyflow/react/dist/style.css";
 import type { Coverage, ParseResult } from "@/lib/parser/types";
+import { categoriesFor } from "@/lib/roles";
 import { useResolvedTheme } from "@/components/use-resolved-theme";
 import {
   PANEL_ROWS,
@@ -26,7 +27,10 @@ import {
   type VisibleItem,
 } from "@/lib/graph";
 import { DetailPane, type DetailsTab } from "./detail-pane";
-import { fileCategories, fileCategory, type FileCategory, type Hover, type Selection } from "./file-category";
+import { fileCategory, type FileCategory, type Hover, type Selection } from "./file-category";
+
+// The rail filters by role; colour still means file kind everywhere else.
+type RoleFilter = { key: string; label: string };
 
 type MapCanvasProps = {
   result: ParseResult;
@@ -39,7 +43,8 @@ type ModuleNodeData = {
   selection: Selection;
   hover: Hover;
   categoryByFile: ReadonlyMap<string, FileCategory>;
-  activeCategory: FileCategory | null;
+  filterKeyByFile: ReadonlyMap<string, string>;
+  activeFilter: RoleFilter | null;
   onToggle: (group: GraphGroup, opening: boolean) => void;
   onSelectFile: (path: string) => void;
   onScroll: (group: GraphGroup, delta: number) => void;
@@ -125,7 +130,7 @@ function layoutNodes(
 const handleStyle = { width: 6, height: 6, opacity: 0, border: "none" };
 
 function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
-  const { item, lit, dim, selection, hover, categoryByFile, activeCategory, onToggle, onSelectFile, onScroll, onHover } = data;
+  const { item, lit, dim, selection, hover, categoryByFile, filterKeyByFile, activeFilter, onToggle, onSelectFile, onScroll, onHover } = data;
   const group = item.group;
 
   // Opening and scrolling swap the handle set without resizing the node, and
@@ -146,8 +151,8 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
     categoryCounts.set(category.name, entry);
   }
   const strip = [...categoryCounts.entries()].sort(([left], [right]) => left.localeCompare(right));
-  const inCategory = (file: string) => activeCategory === null || categoryByFile.get(file)?.name === activeCategory.name;
-  const matchCount = activeCategory === null ? 0 : group.files.filter((file) => categoryByFile.get(file)?.name === activeCategory.name).length;
+  const inFilter = (file: string) => activeFilter === null || filterKeyByFile.get(file) === activeFilter.key;
+  const matchCount = activeFilter === null ? 0 : group.files.filter((file) => filterKeyByFile.get(file) === activeFilter.key).length;
 
   if (item.kind === "module") {
     const hovered =
@@ -168,11 +173,8 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
           <span className="block shrink-0 font-mono text-[10px] leading-[14px] text-(--text)">
             in {group.fanIn} · out {group.fanOut}
           </span>
-          {activeCategory !== null ? (
-            <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] leading-[14px] text-(--text-muted)">
-              <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: activeCategory.color }} />
-              {matchCount} match
-            </span>
+          {activeFilter !== null ? (
+            <span className="block shrink-0 font-mono text-[10px] leading-[14px] text-(--text-muted)">{matchCount} match</span>
           ) : null}
           <span className="absolute inset-x-0 bottom-0 flex h-[3px]">
             {strip.map(([name, { color, count }]) => (
@@ -192,9 +194,9 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
   // Category and selection dimming compose by OR — a row lights up only when
   // neither rule dims it.
   const rowLit = (file: string) =>
-    !dim && ((lit !== null && !lit.has(file)) || !inCategory(file)) ? "opacity-20" : "";
+    !dim && ((lit !== null && !lit.has(file)) || !inFilter(file)) ? "opacity-20" : "";
   const lineLit = (files: string[]) =>
-    dim || files.some((file) => (lit === null || lit.has(file)) && (activeCategory === null || inCategory(file)));
+    dim || files.some((file) => (lit === null || lit.has(file)) && (activeFilter === null || inFilter(file)));
   const rowCentre = (index: number) => PANEL_HEADER_HEIGHT + index * PANEL_ROW_HEIGHT + PANEL_ROW_HEIGHT / 2;
   const panelSelected = selection?.kind === "module" && selection.id === item.id;
   // When overflowing, the "above" cap occupies the first line slot.
@@ -226,12 +228,7 @@ function ModuleNode({ id, data }: NodeProps<ModuleFlowNode>) {
           <span className="block truncate font-mono text-xs font-semibold text-(--text-strong)">{group.label}</span>
           <span className="block font-mono text-[10px] text-(--text-muted)">
             {group.files.length} files · in {group.fanIn} · out {group.fanOut}
-            {activeCategory !== null ? (
-              <>
-                {" · "}
-                <span className="inline-block size-1.5 rounded-full" style={{ backgroundColor: activeCategory.color }} /> {matchCount} match
-              </>
-            ) : null}
+            {activeFilter !== null ? <> · {matchCount} match</> : null}
           </span>
         </span>
         <span className="ml-2 shrink-0 font-mono text-[10px] text-(--text-muted)">close</span>
@@ -309,11 +306,12 @@ function AttachmentHandles({ suffix, top }: { suffix?: string; top?: number }) {
 
 const nodeTypes = { module: ModuleNode };
 
-function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hover, categoryByFile, activeCategory, offsets, onToggle, onSelectFile, onScroll, onClearSelection, onHover }: {
+function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hover, categoryByFile, filterKeyByFile, activeFilter, offsets, onToggle, onSelectFile, onScroll, onClearSelection, onHover }: {
   result: ParseResult;
   groups: GraphGroup[];
   categoryByFile: ReadonlyMap<string, FileCategory>;
-  activeCategory: FileCategory | null;
+  filterKeyByFile: ReadonlyMap<string, string>;
+  activeFilter: RoleFilter | null;
   expanded: ReadonlySet<string>;
   expandedVersion: number;
   selection: Selection;
@@ -368,7 +366,7 @@ function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hove
         // either rule finds nothing inside it.
         const dim =
           (highlight !== null && !item.group.files.some((file) => highlight.lit.has(file))) ||
-          (activeCategory !== null && !item.group.files.some((file) => categoryByFile.get(file)?.name === activeCategory.name));
+          (activeFilter !== null && !item.group.files.some((file) => filterKeyByFile.get(file) === activeFilter.key));
         return {
           id: item.id,
           type: "module" as const,
@@ -381,10 +379,10 @@ function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hove
           // Above every edge layer (edges use 0 and 1), so lines pass behind
           // open panels instead of across their rows.
           zIndex: 2,
-          data: { item, lit: highlight?.lit ?? null, dim, selection, hover, categoryByFile, activeCategory, onToggle, onSelectFile, onScroll, onHover },
+          data: { item, lit: highlight?.lit ?? null, dim, selection, hover, categoryByFile, filterKeyByFile, activeFilter, onToggle, onSelectFile, onScroll, onHover },
         };
       }),
-    [items, positions, highlight, selection, hover, categoryByFile, activeCategory, onToggle, onSelectFile, onScroll, onHover],
+    [items, positions, highlight, selection, hover, categoryByFile, filterKeyByFile, activeFilter, onToggle, onSelectFile, onScroll, onHover],
   );
 
   const flowEdges = useMemo<FlowEdge[]>(
@@ -392,12 +390,12 @@ function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hove
       edges.map((edge) => {
         const unselected =
           highlight !== null && !edge.files.some((file) => highlight.selected.has(file.from) || highlight.selected.has(file.to));
-        const outsideCategory =
-          activeCategory !== null &&
+        const outsideFilter =
+          activeFilter !== null &&
           !edge.files.some(
-            (file) => categoryByFile.get(file.from)?.name === activeCategory.name || categoryByFile.get(file.to)?.name === activeCategory.name,
+            (file) => filterKeyByFile.get(file.from) === activeFilter.key || filterKeyByFile.get(file.to) === activeFilter.key,
           );
-        const dimmed = unselected || outsideCategory;
+        const dimmed = unselected || outsideFilter;
         // Direction reads against the selection: green flows into it, amber out
         // of it. Coloured edges paint above the dimmed grey ones.
         const active = highlight !== null && !unselected;
@@ -420,7 +418,7 @@ function FlowCanvas({ result, groups, expanded, expandedVersion, selection, hove
           markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: markerColor },
         };
       }),
-    [edges, highlight, hex, activeCategory, categoryByFile],
+    [edges, highlight, hex, activeFilter, filterKeyByFile],
   );
 
   // Refit only after React Flow holds the post-change nodes; the zoom cap means
@@ -494,16 +492,29 @@ function CoverageBanner({ coverage, skipped }: { coverage: Coverage; skipped: nu
 
 export function MapCanvas({ result }: MapCanvasProps) {
   const groups = useMemo(() => foldModules(result), [result]);
-  const categories = useMemo(() => fileCategories(result.files), [result.files]);
   const categoryByFile = useMemo(
     () => new Map(result.files.map((file) => [file.path, fileCategory(file.extension)])),
     [result.files],
   );
+  // The rail lists the adapter's roles in fixed order; a file whose role
+  // isn't among them (or has none) lands on "Unidentified".
+  const roleCategories = useMemo(() => categoriesFor(result.adapter), [result.adapter]);
+  const { filterKeyByFile, railRows } = useMemo(() => {
+    const known = new Set(roleCategories.map((category) => category.role));
+    const filterKeyByFile = new Map(result.files.map((file) => [file.path, file.role !== null && known.has(file.role) ? file.role : "unidentified"]));
+    const counts = new Map<string, number>();
+    for (const key of filterKeyByFile.values()) counts.set(key, (counts.get(key) ?? 0) + 1);
+    const railRows = [
+      ...roleCategories.map((category) => ({ key: category.role, label: category.label, count: counts.get(category.role) ?? 0 })),
+      { key: "unidentified", label: "Unidentified", count: counts.get("unidentified") ?? 0 },
+    ];
+    return { filterKeyByFile, railRows };
+  }, [result.files, roleCategories]);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [selection, setSelection] = useState<Selection>(null);
   const [hover, setHover] = useState<Hover>(null);
   const [detailsTab, setDetailsTab] = useState<DetailsTab>("structure");
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [activeFilter, setActiveFilter] = useState<RoleFilter | null>(null);
   // Lives here rather than in the summary so selecting a file doesn't lose it.
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [expandedVersion, setExpandedVersion] = useState(0);
@@ -572,7 +583,17 @@ export function MapCanvas({ result }: MapCanvasProps) {
 
   const handleClearSelection = useCallback(() => setSelection(null), []);
 
-  const activeCategoryRecord = categories.find((category) => category.name === activeCategory) ?? null;
+  // Esc returns the map to its unfocused state: no selected node, no rail filter.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]")) return;
+      setSelection(null);
+      setActiveFilter(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   return (
     <main className="flex min-h-[calc(100vh-65px)] min-w-230 flex-col">
@@ -588,22 +609,20 @@ export function MapCanvas({ result }: MapCanvasProps) {
       <div className="grid min-h-0 flex-1 grid-cols-[13rem_minmax(0,1fr)_17rem]">
         <aside className="flex min-h-0 flex-col border-r border-zinc-200 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/40">
           <div className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">Files</p>
-            <p className="mt-1 text-xs text-zinc-400">Categories</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">Roles</p>
+            <p className="mt-1 font-mono text-[10px] text-zinc-400">{result.adapter === "fallback" ? "no framework" : result.adapter}</p>
           </div>
           <div className="space-y-1 px-3 py-3">
-            {categories.map((category) => (
+            {railRows.map((row) => (
               <button
-                className={`flex w-full items-center justify-between gap-2 px-1 py-1.5 text-left hover:bg-(--row-hover) ${activeCategory === category.name ? "bg-(--row-hover) shadow-[inset_2px_0_0_var(--select)]" : ""}`}
-                key={category.name}
+                className={`flex w-full items-center justify-between gap-2 px-1 py-1.5 text-left enabled:hover:bg-(--row-hover) ${activeFilter?.key === row.key ? "bg-(--row-hover) shadow-[inset_2px_0_0_var(--select)]" : ""} ${row.count === 0 ? "cursor-default text-zinc-400 dark:text-zinc-600" : ""}`}
+                disabled={row.count === 0}
+                key={row.key}
                 type="button"
-                onClick={() => setActiveCategory((current) => (current === category.name ? null : category.name))}
+                onClick={() => setActiveFilter((current) => (current?.key === row.key ? null : { key: row.key, label: row.label }))}
               >
-                <span className="flex min-w-0 items-center gap-2">
-                  <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: category.color }} />
-                  <span className="truncate font-mono text-[10px] text-zinc-600 dark:text-zinc-300">{category.name}</span>
-                </span>
-                <span className="font-mono text-[10px] text-zinc-400">{category.count}</span>
+                <span className={`truncate font-mono text-[10px] ${row.count === 0 ? "" : "text-zinc-600 dark:text-zinc-300"}`}>{row.label}</span>
+                <span className="font-mono text-[10px] text-zinc-400">{row.count}</span>
               </button>
             ))}
           </div>
@@ -611,8 +630,9 @@ export function MapCanvas({ result }: MapCanvasProps) {
         <section aria-label="Map canvas" className="min-h-0 min-w-0 bg-(--canvas)">
           <ReactFlowProvider>
             <FlowCanvas
-              activeCategory={activeCategoryRecord}
+              activeFilter={activeFilter}
               categoryByFile={categoryByFile}
+              filterKeyByFile={filterKeyByFile}
               expanded={expanded}
               expandedVersion={expandedVersion}
               groups={groups}

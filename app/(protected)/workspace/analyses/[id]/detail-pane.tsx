@@ -15,6 +15,7 @@ import {
   type Neighbour,
 } from "@/lib/graph";
 import type { ParseResult } from "@/lib/parser/types";
+import { categoriesFor, reachedRoles } from "@/lib/roles";
 
 export type DetailsTab = "structure" | "explanation";
 
@@ -179,7 +180,7 @@ function RepositorySummary({ result, highlighted, onHover, onRevealFile, insight
   onToggleInsights: () => void;
 }) {
   const summary = useMemo(() => repositorySummary(result.files, result.edges), [result.files, result.edges]);
-  const insightData = useMemo(() => insights(result.files, result.edges), [result.files, result.edges]);
+  const insightData = useMemo(() => insights(result.files, result.edges, reachedRoles(result.adapter)), [result.files, result.edges, result.adapter]);
   const moreUnimported = summary.unimportedTotal - summary.unimported.length;
   // Files no convention recognised — the rest are reached by the framework,
   // a config loader or a test runner rather than by an import.
@@ -193,8 +194,32 @@ function RepositorySummary({ result, highlighted, onHover, onRevealFile, insight
         <Stat label="Framework" value={result.adapter === "fallback" ? "none (fallback adapter)" : result.adapter} />
         <Stat label="Files" value={result.files.length} />
         <Stat label="Imports" value={`${result.coverage.resolved} resolved / ${result.coverage.total} found`} />
-        <Stat label="Routes" title="No adapter recovered routes" value="—" />
+        <Stat label="Routes" value={result.routes.length} />
         <Stat label="Unidentified" value={unidentified} />
+      </div>
+
+      <SectionHeading>Routes · {result.routes.length}</SectionHeading>
+      <div className="mt-1">
+        {result.routes.length === 0 ? (
+          <p className="px-1 py-0.5 font-mono text-[10px] leading-4 text-(--text-faint)">
+            {result.adapter === "fallback" ? "no framework adapter matched" : "none"}
+          </p>
+        ) : (
+          result.routes.map((route) => (
+            <button
+              className={`flex w-full items-baseline gap-2 px-1 py-0.5 text-left font-mono text-[10px] leading-4 text-(--text) hover:bg-(--row-hover) ${highlighted(route.file) ? "ring-1 ring-inset ring-(--select)" : ""}`}
+              key={`${route.method}${route.path}${route.file}`}
+              title={route.file}
+              type="button"
+              onClick={() => onRevealFile(route.file)}
+              onMouseEnter={() => onHover({ kind: "file", path: route.file })}
+              onMouseLeave={() => onHover(null)}
+            >
+              <span className="w-14 shrink-0 text-(--text-faint)">{route.method}</span>
+              <span className="min-w-0 break-all">{route.path}</span>
+            </button>
+          ))
+        )}
       </div>
 
       <SectionHeading>Most imported</SectionHeading>
@@ -313,6 +338,7 @@ function FileStructure({ path, result, groups, adjacency, highlighted, onHover, 
         </div>
         <Stat label="Lines" value={file.lines} />
         <Stat label="Folder" value={group?.label ?? "—"} title={group?.path} />
+        <Stat label="Role" value={categoriesFor(result.adapter).find((category) => category.role === file.role)?.label ?? "—"} />
       </div>
 
       <div className="mt-2 flex gap-1">

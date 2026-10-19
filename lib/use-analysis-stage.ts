@@ -22,8 +22,13 @@ export function useAnalysisStage(analysisId: string, enabled: boolean, onPayload
     // CLOSED also fires on an intentional removeChannel; this flag tells the
     // intentional close from a dropped socket.
     let gone = false;
+    let latestDeliveredAt = -Infinity;
 
     const deliver = (payload: StagePayload) => {
+      if (gone) return;
+      const updatedAt = Date.parse(payload.updated_at);
+      if (!Number.isFinite(updatedAt) || updatedAt <= latestDeliveredAt) return;
+      latestDeliveredAt = updatedAt;
       handlerRef.current(payload);
       if (payload.status === "complete" || payload.status === "failed") {
         gone = true;
