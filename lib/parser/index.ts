@@ -11,6 +11,7 @@ import type {
   FileMetrics,
   FileRecord,
   ParseResult,
+  Selection,
 } from "./types.ts";
 
 const ignoredDirectories = new Set([".git", ".next", "node_modules", "dist", "build", "coverage"]);
@@ -180,7 +181,7 @@ async function readPathAliases(root: string): Promise<PathAlias[]> {
   }
 }
 
-export async function parseRepository(repositoryPath: string, adapter?: ParserAdapter): Promise<ParseResult> {
+export async function selectFiles(repositoryPath: string, adapter?: ParserAdapter): Promise<Selection> {
   const root = path.resolve(repositoryPath);
   const rootDetails = await stat(root);
   if (!rootDetails.isDirectory()) throw new Error(`Repository path is not a directory: ${repositoryPath}`);
@@ -194,6 +195,11 @@ export async function parseRepository(repositoryPath: string, adapter?: ParserAd
     if (!include) skipped.push({ path: relativePath, reason: "excluded by parser adapter" });
     return include;
   });
+  return { root, adapter: resolvedAdapter, entries, skipped, allPaths };
+}
+
+export async function parseSelection(selection: Selection): Promise<ParseResult> {
+  const { root, adapter: resolvedAdapter, entries, skipped, allPaths } = selection;
   const included = new Set(entries.map(({ relativePath }) => relativePath));
   const aliases = await readPathAliases(root);
   const files: FileRecord[] = [];
@@ -262,6 +268,10 @@ export async function parseRepository(repositoryPath: string, adapter?: ParserAd
       folders: new Set(files.map((file) => file.directory)).size,
     },
   };
+}
+
+export async function parseRepository(repositoryPath: string, adapter?: ParserAdapter): Promise<ParseResult> {
+  return parseSelection(await selectFiles(repositoryPath, adapter));
 }
 
 export type { ParserAdapter } from "./adapter.ts";

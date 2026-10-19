@@ -90,7 +90,7 @@ function nextRole(filePath: string, allPaths: ReadonlySet<string>): FileRole | n
       const directory = stem.includes("/") ? stem.slice(0, stem.lastIndexOf("/")) : "";
       if (directory === "" || directory === "src") {
         if (base === "middleware" || base === "proxy") return "middleware";
-        if (base === "instrumentation") return "framework file";
+        if (base === "instrumentation" || base === "instrumentation-client") return "framework file";
       }
     }
     break;
