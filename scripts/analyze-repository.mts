@@ -25,4 +25,4 @@ if (existing) {
 
 console.log(`Analysis: ${analysisId}`);
 const result = await runAnalysis(analysisId, (stage, message) => console.log(`[${stage}] ${message}`));
-printParseReport({ adapter: result.adapter, summary: result.summary, edgeCount: result.edges.length, routes: result.routes, coverage: result.coverage, skipped: result.skipped });
+printParseReport({ adapter: result.adapter, summary: result.summary, edgeCount: result.edges.length, routes: result.routes, coverage: result.coverage, commonjsExportsFiles: result.files.filter((file) => file.commonjsExports !== undefined).length, skipped: result.skipped });

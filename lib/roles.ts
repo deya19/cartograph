@@ -22,10 +22,11 @@ export type FileRole =
   | "interceptor"
   | "pipe"
   | "filter"
+  | "model"
   | "config"
   | "test";
 
-export type AdapterName = "nestjs" | "nextjs" | "react" | "fallback";
+export type AdapterName = "nestjs" | "nextjs" | "express" | "react" | "fallback";
 
 export type RouteMethod = "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS" | "ALL" | "SEARCH" | "PAGE";
 
@@ -63,6 +64,7 @@ export const FILE_ROLES: readonly FileRole[] = [
   "interceptor",
   "pipe",
   "filter",
+  "model",
   "config",
   "test",
 ];
@@ -102,6 +104,15 @@ export const ROLE_CATEGORIES: Record<AdapterName, readonly RoleCategory[]> = {
     { role: "config", label: "Config", reached: true },
     { role: "test", label: "Tests", reached: true },
   ],
+  express: [
+    { role: "route", label: "Routes", reached: false },
+    { role: "controller", label: "Controllers", reached: false },
+    { role: "middleware", label: "Middleware", reached: false },
+    { role: "service", label: "Services", reached: false },
+    { role: "model", label: "Models", reached: false },
+    { role: "config", label: "Config", reached: true },
+    { role: "test", label: "Tests", reached: true },
+  ],
   react: [
     { role: "component", label: "Components", reached: false },
     { role: "hook", label: "Hooks", reached: false },
@@ -115,7 +126,7 @@ export const ROLE_CATEGORIES: Record<AdapterName, readonly RoleCategory[]> = {
 };
 
 function isAdapterName(name: string): name is AdapterName {
-  return name === "nestjs" || name === "nextjs" || name === "react" || name === "fallback";
+  return name === "nestjs" || name === "nextjs" || name === "express" || name === "react" || name === "fallback";
 }
 
 function categories(adapter: string): readonly RoleCategory[] {

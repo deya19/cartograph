@@ -5,7 +5,7 @@ export type { FileRole, RouteMethod } from "../roles.ts";
 
 export type Route = { file: string; method: RouteMethod; path: string };
 
-export type EdgeKind = "import" | "re-export" | "dynamic-import";
+export type EdgeKind = "import" | "re-export" | "dynamic-import" | "require";
 
 export type CoverageStatus = "resolved" | "outside" | "excluded" | "unresolved";
 
@@ -17,6 +17,9 @@ export type FileRecord = {
   lines: number;
   sha256: string;
   role: FileRole | null;
+  // Present only when the file has at least one recoverable CommonJS export —
+  // ESM output keeps its shape.
+  commonjsExports?: string[];
 };
 
 export type Edge = {
@@ -39,6 +42,8 @@ export type Coverage = {
   outside: number;
   excluded: number;
   unresolved: number;
+  // Analyses stored before the "require" kind existed may omit that key;
+  // readers treat a missing entry as { found: 0, resolved: 0 }.
   kindCounts: Record<EdgeKind, { found: number; resolved: number }>;
   examples: CoverageExample[];
 };
