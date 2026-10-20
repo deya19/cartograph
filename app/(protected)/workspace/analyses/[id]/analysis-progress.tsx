@@ -1,10 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
-import { isStale, stages, type Stage, type StagePayload } from "@/lib/analysis-stage";
+import { useEffect, useRef, useState } from "react";
+import { isStale, staleAfterMs, stages, type Stage, type StagePayload } from "@/lib/analysis-stage";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { useAnalysisStage } from "@/lib/use-analysis-stage";
+import { retryAnalysis } from "../../actions";
 
 export type AnalysisProgressProps = {
   analysisId: string;
@@ -60,7 +61,14 @@ export function AnalysisProgress({ analysisId, repositoryName, commitSha, initia
   const currentIndex = live.stage ? stages.indexOf(live.stage) : -1;
   // Staleness is a property of when you look, not a timer — "now" is captured
   // once at mount, not ticked.
-  const [now] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!unfinished) return;
+
+    const deadline = new Date(live.updated_at).getTime() + staleAfterMs;
+    const timeout = window.setTimeout(() => setNow(Date.now()), Math.max(0, deadline - Date.now()));
+    return () => window.clearTimeout(timeout);
+  }, [live.updated_at, unfinished]);
   const stale = isStale(live.status, live.updated_at, now);
 
   return (
@@ -123,6 +131,18 @@ export function AnalysisProgress({ analysisId, repositoryName, commitSha, initia
         <p className="font-mono text-xs text-zinc-500">
           No progress since {formatRelativeTime(live.updated_at)}. This run may have stopped.
         </p>
+      ) : null}
+
+      {live.status === "failed" || stale ? (
+        <form action={retryAnalysis}>
+          <input name="analysisId" type="hidden" value={analysisId} />
+          <button
+            className="border border-zinc-300 px-3 py-2 font-mono text-xs text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            type="submit"
+          >
+            Retry analysis
+          </button>
+        </form>
       ) : null}
 
       {notice ? <p className="font-mono text-xs text-zinc-500">{notice}</p> : null}

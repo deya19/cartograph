@@ -1,10 +1,13 @@
-import type { ParserAdapter } from "./adapter.ts";
+import type { ParserAdapter, ProjectContext } from "./adapters/index.ts";
+import type { FileRole, RouteMethod } from "../roles.ts";
+
+export type { FileRole, RouteMethod } from "../roles.ts";
+
+export type Route = { file: string; method: RouteMethod; path: string };
 
 export type EdgeKind = "import" | "re-export" | "dynamic-import";
 
 export type CoverageStatus = "resolved" | "outside" | "excluded" | "unresolved";
-
-export type FileRole = "page" | "layout" | "route" | "middleware" | "framework file" | "config" | "test";
 
 export type FileRecord = {
   path: string;
@@ -51,6 +54,7 @@ export type Selection = {
   entries: Array<{ absolutePath: string; relativePath: string }>;
   skipped: Array<{ path: string; reason: string }>;
   allPaths: ReadonlySet<string>;
+  context: ProjectContext;
 };
 
 export type ParseResult = {
@@ -58,6 +62,7 @@ export type ParseResult = {
   adapter: string;
   files: FileRecord[];
   edges: Edge[];
+  routes: Route[];
   metrics: Record<string, FileMetrics>;
   coverage: Coverage;
   skipped: Array<{ path: string; reason: string }>;

@@ -96,6 +96,8 @@ export async function fetchArchive(owner: string, repo: string, dest: string): P
   });
 
   const notExtracted: Array<{ path: string; type: string }> = [];
+  let extractedBytes = 0;
+  let extractionError: Error | null = null;
   // Readable.fromWeb takes a stream/web ReadableStream while fetch() returns
   // undici's; pumping the reader by hand avoids casting between the two.
   const reader = archive.body.getReader();
@@ -119,12 +121,22 @@ export async function fetchArchive(owner: string, repo: string, dest: string): P
         // tar's filter entry is Stats when reading from a file path argument;
         // piping always produces a ReadEntry, which carries the tar type.
         const type = "type" in entry ? entry.type : "File";
-        if (type === "File" || type === "Directory") return true;
+        if (type === "File") {
+          extractedBytes += entry.size;
+          if (extractedBytes > maxArchiveBytes) {
+            extractionError = new Error("Extracted archive exceeds the 100 MB limit");
+            source.destroy(extractionError);
+            return false;
+          }
+          return true;
+        }
+        if (type === "Directory") return true;
         notExtracted.push({ path: entryPath.split("/").slice(1).join("/"), type });
         return false;
       },
     }),
   );
+  if (extractionError) throw extractionError;
 
   return { sha, defaultBranch, fullName, notExtracted };
 }

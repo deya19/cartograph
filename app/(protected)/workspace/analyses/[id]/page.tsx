@@ -2,7 +2,8 @@ import { notFound } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { fileMetrics } from "@/lib/graph";
-import type { Coverage, Edge, EdgeKind, FileRecord, FileRole, ParseResult } from "@/lib/parser/types";
+import type { Coverage, Edge, EdgeKind, FileRecord, FileRole, ParseResult, Route, RouteMethod } from "@/lib/parser/types";
+import { FILE_ROLES, ROUTE_METHODS } from "@/lib/roles";
 import { AnalysisProgress } from "./analysis-progress";
 import { MapCanvas } from "./map-canvas";
 import type { StagePayload } from "@/lib/analysis-stage";
@@ -39,11 +40,21 @@ type EdgeRow = {
   import_kind: string;
 };
 
-const FILE_ROLES: readonly string[] = ["page", "layout", "route", "middleware", "framework file", "config", "test"];
+type RouteRow = {
+  file_id: string;
+  method: string;
+  path: string;
+};
+
 const EDGE_KINDS: readonly string[] = ["import", "re-export", "dynamic-import"];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isFileRole(role: string): role is FileRole {
-  return FILE_ROLES.includes(role);
+  return FILE_ROLES.some((known) => known === role);
+}
+
+function isRouteMethod(method: string): method is RouteMethod {
+  return ROUTE_METHODS.some((known) => known === method);
 }
 
 function isEdgeKind(kind: string): kind is EdgeKind {
@@ -91,6 +102,20 @@ async function loadResult(supabase: SupabaseClient, analysis: AnalysisRow): Prom
     if (page.length < 1000) break;
   }
 
+  const routeRows: RouteRow[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from("routes")
+      .select("file_id, method, path")
+      .eq("analysis_id", analysis.id)
+      .order("id")
+      .range(from, from + 999);
+    if (error) throw new Error(`Could not load routes: ${error.message}`);
+    const page = (data ?? []) as RouteRow[];
+    routeRows.push(...page);
+    if (page.length < 1000) break;
+  }
+
   const files: FileRecord[] = fileRows.map((row) => {
     if (row.role !== null && !isFileRole(row.role)) {
       throw new Error(`Unknown file role stored: ${row.role}`);
@@ -115,11 +140,21 @@ async function loadResult(supabase: SupabaseClient, analysis: AnalysisRow): Prom
     return { from, to, kind: row.import_kind };
   });
 
+  const routes: Route[] = routeRows
+    .map((row) => {
+      const file = pathByFileId.get(row.file_id);
+      if (!file) throw new Error(`Stored route references a file that was not stored: ${row.file_id}`);
+      if (!isRouteMethod(row.method)) throw new Error(`Unknown route method stored: ${row.method}`);
+      return { file, method: row.method, path: row.path };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path) || left.method.localeCompare(right.method) || left.file.localeCompare(right.file));
+
   return {
     root: analysis.project.name,
     adapter: analysis.adapter,
     files,
     edges,
+    routes,
     metrics: fileMetrics(files, edges),
     coverage: analysis.coverage,
     skipped: analysis.skipped,
@@ -129,6 +164,8 @@ async function loadResult(supabase: SupabaseClient, analysis: AnalysisRow): Prom
 
 export default async function AnalysisPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  if (!UUID_PATTERN.test(id)) notFound();
+
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase
     .from("analyses")

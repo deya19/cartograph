@@ -1,4 +1,4 @@
-import type { Edge, EdgeKind, FileMetrics, FileRecord, ParseResult } from "./parser/types";
+import type { Edge, EdgeKind, FileMetrics, FileRecord, FileRole, ParseResult } from "./parser/types";
 
 export type GraphGroup = {
   id: string;
@@ -470,7 +470,7 @@ function cycleThrough(start: string, members: ReadonlySet<string>, dependencies:
   return [start];
 }
 
-export function insights(files: FileRecord[], edges: Edge[]): Insights {
+export function insights(files: FileRecord[], edges: Edge[], reachedRoles: ReadonlySet<FileRole>): Insights {
   const adjacency = buildAdjacency(edges);
 
   const importers = new Map<string, number>();
@@ -480,9 +480,9 @@ export function insights(files: FileRecord[], edges: Edge[]): Insights {
   }
 
   const noImporters = files.filter((file) => (importers.get(file.path) ?? 0) === 0);
-  // A role means the framework, config or test runner reaches the file, so
-  // zero importers says nothing about whether it's used.
-  const unimported = noImporters.filter((file) => file.role === null).map((file) => file.path).sort();
+  // Only a reached role means the framework, config or test runner gets to
+  // the file — a Nest service nothing imports is genuinely unimported.
+  const unimported = noImporters.filter((file) => file.role === null || !reachedRoles.has(file.role)).map((file) => file.path).sort();
   const unimportedReached = noImporters.length - unimported.length;
 
   const counts = files.map((file) => importers.get(file.path) ?? 0);

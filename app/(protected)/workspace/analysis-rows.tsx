@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { isStale, type StagePayload } from "@/lib/analysis-stage";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { useAnalysisStage } from "@/lib/use-analysis-stage";
@@ -53,7 +53,13 @@ function AnalysisRow({ initial }: { initial: AnalysisRowData }) {
   const notice = useAnalysisStage(initial.id, unfinished, setLive);
   // Staleness is a property of when you look, not a timer — "now" is captured
   // once at mount, not ticked.
-  const [now] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!unfinished) return;
+
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [unfinished]);
   const stale = isStale(status, updatedAt, now);
 
   return (
