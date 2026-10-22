@@ -18,7 +18,7 @@ const repository = args.find((arg) => !arg.startsWith("--"));
 if (!repository) usage();
 
 const result = await parseRepository(repository);
-printParseReport({ adapter: result.adapter, summary: result.summary, edgeCount: result.edges.length, routes: result.routes, coverage: result.coverage, skipped: result.skipped });
+printParseReport({ adapter: result.adapter, summary: result.summary, edgeCount: result.edges.length, routes: result.routes, coverage: result.coverage, commonjsExportsFiles: result.files.filter((file) => file.commonjsExports !== undefined).length, skipped: result.skipped });
 
 const destination = outputPath(args);
 if (destination) {

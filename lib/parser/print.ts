@@ -6,6 +6,7 @@ export type ParseReport = {
   edgeCount: number;
   routes: ParseResult["routes"];
   coverage: Coverage;
+  commonjsExportsFiles: number;
   skipped: Array<{ path: string; reason: string }>;
 };
 
@@ -19,10 +20,12 @@ export function printParseReport(report: ParseReport): void {
   console.log(`Routes: ${report.routes.length}`);
   for (const route of report.routes) console.log(`  ${route.method} ${route.path}  (${route.file})`);
   console.log(`Imports: ${report.coverage.total} (${report.coverage.resolved} resolved, ${report.coverage.outside} outside, ${report.coverage.excluded} excluded, ${report.coverage.unresolved} unresolved)`);
-  for (const kind of ["import", "re-export", "dynamic-import"] as const) {
-    const counts = report.coverage.kindCounts[kind];
+  for (const kind of ["import", "re-export", "dynamic-import", "require"] as const) {
+    // Reports from stored analyses may predate the "require" kind.
+    const counts = report.coverage.kindCounts[kind] ?? { found: 0, resolved: 0 };
     console.log(`${kind}: ${counts.found} found, ${counts.resolved} resolved`);
   }
+  console.log(`CommonJS exports: ${report.commonjsExportsFiles} files`);
   if (report.skipped.length > 0) {
     console.log("Skipped files:");
     for (const skipped of report.skipped) console.log(`  ${skipped.path}: ${skipped.reason}`);

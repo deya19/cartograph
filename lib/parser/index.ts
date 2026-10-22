@@ -11,6 +11,7 @@ import type {
   EdgeKind,
   FileMetrics,
   FileRecord,
+  KindCount,
   ParseResult,
   Selection,
 } from "./types.ts";
@@ -22,6 +23,9 @@ const maxExamples = 100;
 type ImportReference = {
   specifier: string;
   kind: EdgeKind;
+  // Set when the reference is counted but never resolved — a require() call in
+  // a file that declares its own `require` binding.
+  reason?: string;
 };
 
 type FileEntry = {
@@ -107,6 +111,128 @@ function collectImports(sourceFile: ts.SourceFile): ImportReference[] {
   return references;
 }
 
+function bindingNamesRequire(name: ts.BindingName | undefined): boolean {
+  if (!name) return false;
+  if (ts.isIdentifier(name)) return name.text === "require";
+  return name.elements.some((element) => ts.isBindingElement(element) && bindingNamesRequire(element.name));
+}
+
+// A file that binds its own `require` (variable, function, parameter, import)
+// isn't calling CommonJS require, so its calls are counted as unresolved
+// rather than resolved as module references.
+function declaresRequire(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) && bindingNamesRequire(node.name)) {
+      found = true;
+      return;
+    }
+    if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node)) && node.name?.text === "require") {
+      found = true;
+      return;
+    }
+    if ((ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) && node.name.text === "require") {
+      found = true;
+      return;
+    }
+    if (ts.isImportClause(node) && node.name?.text === "require") {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+function collectRequires(sourceFile: ts.SourceFile): ImportReference[] {
+  const redefined = declaresRequire(sourceFile);
+  const references: ImportReference[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportEqualsDeclaration(node)) {
+      const reference = node.moduleReference;
+      // import x = require("./a") is a module reference even in a file that
+      // redefines `require` — the shadowing rule only covers call expressions.
+      if (ts.isExternalModuleReference(reference) && ts.isStringLiteral(reference.expression)) {
+        references.push({ specifier: reference.expression.text, kind: "require" });
+      }
+    } else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require" && node.arguments.length === 1) {
+      const argument = node.arguments[0];
+      if (ts.isStringLiteral(argument)) {
+        references.push({ specifier: argument.text, kind: "require", ...(redefined ? { reason: "require is redefined in this file" } : {}) });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return references;
+}
+
+// `exports.x` and `module.exports.x` — also `module.exports` itself.
+function isExportsAccess(expression: ts.Expression): boolean {
+  return (
+    (ts.isIdentifier(expression) && expression.text === "exports") ||
+    (ts.isPropertyAccessExpression(expression) && expression.name.text === "exports" && ts.isIdentifier(expression.expression) && expression.expression.text === "module")
+  );
+}
+
+function isModuleExports(expression: ts.Expression): boolean {
+  return ts.isPropertyAccessExpression(expression) && expression.name.text === "exports" && ts.isIdentifier(expression.expression) && expression.expression.text === "module";
+}
+
+function propertyNameText(name: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text;
+  return undefined;
+}
+
+// A spread or computed key means the export list can't be recovered exactly —
+// none of that object's names are recorded.
+function objectLiteralExportNames(expression: ts.ObjectLiteralExpression): string[] | undefined {
+  const names: string[] = [];
+  for (const property of expression.properties) {
+    if (ts.isShorthandPropertyAssignment(property)) {
+      names.push(property.name.text);
+    } else if (ts.isPropertyAssignment(property) || ts.isMethodDeclaration(property) || ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property)) {
+      const name = propertyNameText(property.name);
+      if (name === undefined) return undefined;
+      names.push(name);
+    } else {
+      return undefined;
+    }
+  }
+  return names;
+}
+
+// Top-level statements only: exports.foo = …, exports["foo"] = …,
+// module.exports.foo = …, module.exports["foo"] = …, module.exports = {…},
+// and module.exports = <anything else> which exports a single default.
+function collectCommonjsExports(sourceFile: ts.SourceFile): string[] | undefined {
+  const names = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExpressionStatement(statement)) continue;
+    const expression = statement.expression;
+    if (!ts.isBinaryExpression(expression) || expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) continue;
+    const left = expression.left;
+    if (ts.isPropertyAccessExpression(left) && isExportsAccess(left.expression)) {
+      names.add(left.name.text);
+    } else if (ts.isElementAccessExpression(left) && isExportsAccess(left.expression) && ts.isStringLiteral(left.argumentExpression)) {
+      names.add(left.argumentExpression.text);
+    } else if (isModuleExports(left)) {
+      const right = expression.right;
+      if (ts.isObjectLiteralExpression(right)) {
+        const objectNames = objectLiteralExportNames(right);
+        if (objectNames !== undefined) for (const name of objectNames) names.add(name);
+      } else {
+        names.add("default");
+      }
+    }
+  }
+  return names.size === 0 ? undefined : [...names].sort();
+}
+
 function candidates(filePath: string): string[] {
   const extension = path.extname(filePath);
   const withoutExtension = extension ? filePath.slice(0, -extension.length) : filePath;
@@ -165,8 +291,17 @@ async function resolveFile(specifier: string, fromFile: string, root: string, in
 function addCoverage(coverage: Coverage, example: CoverageExample): void {
   coverage.total += 1;
   coverage[example.status] += 1;
-  coverage.kindCounts[example.kind].found += 1;
+  kindCount(coverage, example.kind).found += 1;
   if (coverage.examples.length < maxExamples) coverage.examples.push(example);
+}
+
+function kindCount(coverage: Coverage, kind: EdgeKind): KindCount {
+  const count = coverage.kindCounts[kind];
+  if (count !== undefined) return count;
+  if (kind !== "require") throw new Error(`Missing coverage count for ${kind}`);
+  const initialized: KindCount = { found: 0, resolved: 0 };
+  coverage.kindCounts.require = initialized;
+  return initialized;
 }
 
 async function readPathAliases(root: string): Promise<PathAlias[]> {
@@ -223,6 +358,7 @@ export async function parseSelection(selection: Selection): Promise<ParseResult>
       import: { found: 0, resolved: 0 },
       "re-export": { found: 0, resolved: 0 },
       "dynamic-import": { found: 0, resolved: 0 },
+      require: { found: 0, resolved: 0 },
     },
     examples: [],
   };
@@ -231,6 +367,7 @@ export async function parseSelection(selection: Selection): Promise<ParseResult>
     const content = await readFile(entry.absolutePath, "utf8");
     const relativePath = entry.relativePath;
     const sourceFile = ts.createSourceFile(relativePath, content, ts.ScriptTarget.Latest, true);
+    const commonjsExports = collectCommonjsExports(sourceFile);
     files.push({
       path: relativePath,
       directory: normalize(path.dirname(relativePath)) === "." ? "." : normalize(path.dirname(relativePath)),
@@ -239,13 +376,16 @@ export async function parseSelection(selection: Selection): Promise<ParseResult>
       extension: path.extname(relativePath),
       lines: lineCount(content),
       sha256: createHash("sha256").update(content).digest("hex"),
+      ...(commonjsExports === undefined ? {} : { commonjsExports }),
     });
 
-    for (const reference of collectImports(sourceFile)) {
-      const resolution = await resolveFile(reference.specifier, entry.absolutePath, root, included, aliases);
+    // Requires are collected in a second pass so existing import edges keep
+    // their order; each kind dedupes separately.
+    for (const reference of [...collectImports(sourceFile), ...collectRequires(sourceFile)]) {
+      const resolution = reference.reason !== undefined ? { status: "unresolved" as const, reason: reference.reason } : await resolveFile(reference.specifier, entry.absolutePath, root, included, aliases);
       addCoverage(coverage, { from: relativePath, specifier: reference.specifier, kind: reference.kind, status: resolution.status, reason: resolution.reason });
       if (resolution.status === "resolved" && resolution.target) {
-        coverage.kindCounts[reference.kind].resolved += 1;
+        kindCount(coverage, reference.kind).resolved += 1;
         const key = `${relativePath}\0${resolution.target}\0${reference.kind}`;
         if (!edgeKeys.has(key)) {
           edgeKeys.add(key);
