@@ -11,6 +11,7 @@ import type {
   EdgeKind,
   FileMetrics,
   FileRecord,
+  KindCount,
   ParseResult,
   Selection,
 } from "./types.ts";
@@ -290,8 +291,17 @@ async function resolveFile(specifier: string, fromFile: string, root: string, in
 function addCoverage(coverage: Coverage, example: CoverageExample): void {
   coverage.total += 1;
   coverage[example.status] += 1;
-  coverage.kindCounts[example.kind].found += 1;
+  kindCount(coverage, example.kind).found += 1;
   if (coverage.examples.length < maxExamples) coverage.examples.push(example);
+}
+
+function kindCount(coverage: Coverage, kind: EdgeKind): KindCount {
+  const count = coverage.kindCounts[kind];
+  if (count !== undefined) return count;
+  if (kind !== "require") throw new Error(`Missing coverage count for ${kind}`);
+  const initialized: KindCount = { found: 0, resolved: 0 };
+  coverage.kindCounts.require = initialized;
+  return initialized;
 }
 
 async function readPathAliases(root: string): Promise<PathAlias[]> {
@@ -375,7 +385,7 @@ export async function parseSelection(selection: Selection): Promise<ParseResult>
       const resolution = reference.reason !== undefined ? { status: "unresolved" as const, reason: reference.reason } : await resolveFile(reference.specifier, entry.absolutePath, root, included, aliases);
       addCoverage(coverage, { from: relativePath, specifier: reference.specifier, kind: reference.kind, status: resolution.status, reason: resolution.reason });
       if (resolution.status === "resolved" && resolution.target) {
-        coverage.kindCounts[reference.kind].resolved += 1;
+        kindCount(coverage, reference.kind).resolved += 1;
         const key = `${relativePath}\0${resolution.target}\0${reference.kind}`;
         if (!edgeKeys.has(key)) {
           edgeKeys.add(key);

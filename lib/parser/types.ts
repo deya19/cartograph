@@ -36,15 +36,24 @@ export type CoverageExample = {
   reason?: string;
 };
 
+export type KindCount = {
+  found: number;
+  resolved: number;
+};
+
 export type Coverage = {
   total: number;
   resolved: number;
   outside: number;
   excluded: number;
   unresolved: number;
-  // Analyses stored before the "require" kind existed may omit that key;
-  // readers treat a missing entry as { found: 0, resolved: 0 }.
-  kindCounts: Record<EdgeKind, { found: number; resolved: number }>;
+  // Analyses stored before the "require" kind existed may omit that key.
+  kindCounts: {
+    import: KindCount;
+    "re-export": KindCount;
+    "dynamic-import": KindCount;
+    require?: KindCount;
+  };
   examples: CoverageExample[];
 };
 
