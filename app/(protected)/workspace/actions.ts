@@ -58,3 +58,37 @@ export async function retryAnalysis(formData: FormData): Promise<void> {
 
   after(() => runAnalysis(analysisId).catch((runError: unknown) => console.error("Analysis retry failed:", runError)));
 }
+
+// Re-analysing a finished run: same claim shape as retry, but the row to take
+// is the complete one. The redirect lands back on the analysis page, where the
+// progress view picks up the queued state.
+export async function reanalyzeRepository(formData: FormData): Promise<void> {
+  const { orgId } = await auth();
+  if (!orgId) return;
+
+  const analysisId = String(formData.get("analysisId") ?? "").trim();
+  if (!analysisId) return;
+
+  const client = createPipelineClient();
+  const { data, error } = await client
+    .from("analyses")
+    .update({
+      status: "queued",
+      stage: null,
+      stage_message: null,
+      stage_updated_at: new Date().toISOString(),
+      error: null,
+      completed_at: null,
+    })
+    .eq("id", analysisId)
+    .eq("organization_id", orgId)
+    .eq("status", "complete")
+    .select("id")
+    .maybeSingle();
+
+  if (error) throw new Error(`Could not claim analysis re-run: ${error.message}`);
+  if (!data) redirect(`/workspace/analyses/${analysisId}`);
+
+  after(() => runAnalysis(analysisId).catch((runError: unknown) => console.error("Analysis re-run failed:", runError)));
+  redirect(`/workspace/analyses/${analysisId}`);
+}

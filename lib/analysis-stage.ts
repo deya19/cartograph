@@ -1,4 +1,4 @@
-export const stages = ["fetching", "selecting", "parsing", "storing"] as const;
+export const stages = ["fetching", "selecting", "parsing", "labelling", "storing"] as const;
 export type Stage = (typeof stages)[number];
 
 export type AnalysisStatus = "queued" | "running" | "complete" | "failed";

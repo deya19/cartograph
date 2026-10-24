@@ -52,6 +52,30 @@ function rateLimitError(response: Response): Error | null {
   return new Error(`GitHub API rate limit reached; try again after ${when}`);
 }
 
+// One file's raw content at a ref. Decoded with ignoreBOM: readFile("utf8")
+// keeps a leading U+FEFF and the parser hashes that string, so stripping the
+// BOM here would break the content-hash comparison.
+export async function fetchRawFile(owner: string, repo: string, ref: string, path: string): Promise<{ status: number; text: string | null }> {
+  const response = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path}`);
+  if (!response.ok) return { status: response.status, text: null };
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(await response.arrayBuffer());
+  return { status: response.status, text };
+}
+
+// HEAD of the default branch as a bare sha — the staleness check compares it
+// against the analysed commit.
+export async function fetchHeadSha(owner: string, repo: string, defaultBranch: string): Promise<string> {
+  const shaResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`, {
+    headers: { Accept: "application/vnd.github.sha", "User-Agent": "cartograph" },
+  });
+  const rateLimited = rateLimitError(shaResponse);
+  if (rateLimited) throw rateLimited;
+  if (!shaResponse.ok) {
+    throw new Error(`Could not resolve ${owner}/${repo}@${defaultBranch}: GitHub API error ${shaResponse.status}`);
+  }
+  return (await shaResponse.text()).trim();
+}
+
 // Resolves the repo's default branch to a commit sha, then downloads and
 // extracts exactly that commit's archive into dest. Entries that are not
 // regular files or directories (symlinks, links) are reported instead of
@@ -72,13 +96,7 @@ export async function fetchArchive(owner: string, repo: string, dest: string): P
   }
   const { default_branch: defaultBranch, full_name: fullName } = metadata;
 
-  const shaResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`, {
-    headers: { Accept: "application/vnd.github.sha", "User-Agent": "cartograph" },
-  });
-  if (!shaResponse.ok) {
-    throw new Error(`Could not resolve ${fullName}@${defaultBranch}: GitHub API error ${shaResponse.status}`);
-  }
-  const sha = (await shaResponse.text()).trim();
+  const sha = await fetchHeadSha(owner, repo, defaultBranch);
 
   const archive = await fetch(`https://codeload.github.com/${owner}/${repo}/tar.gz/${sha}`, {
     headers: { "User-Agent": "cartograph" },
