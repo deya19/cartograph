@@ -1,7 +1,11 @@
 "use client";
 
 import { useMemo, useState, type ReactNode } from "react";
-import { fileCategories, fileCategory, type Hover, type Selection } from "./file-category";
+import { fileCategories, fileCategory, explainTargetKey, type ExplanationState, type ExplainTarget, type Hover, type Selection, type Staleness } from "./file-category";
+import { ExplanationText } from "./explanation-text";
+import { reanalyzeRepository } from "../../actions";
+import type { TracingStatus } from "@/lib/ai/client";
+import type { ModelRole } from "@/lib/roles";
 import {
   buildAdjacency,
   fileNeighbours,
@@ -28,8 +32,14 @@ type DetailPaneProps = {
   onTabChange: (tab: DetailsTab) => void;
   onHover: (hover: Hover) => void;
   onRevealFile: (path: string) => void;
+  onRevealGroup: (group: GraphGroup) => void;
   insightsOpen: boolean;
   onToggleInsights: () => void;
+  analysisId: string;
+  modelRoles: Record<string, ModelRole>;
+  explanations: ReadonlyMap<string, ExplanationState>;
+  onExplain: (target: ExplainTarget) => void;
+  tracing: TracingStatus;
 };
 
 function Stat({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
@@ -171,8 +181,9 @@ function InsightsPanel({ data, highlighted, onHover, onRevealFile }: {
   );
 }
 
-function RepositorySummary({ result, highlighted, onHover, onRevealFile, insightsOpen, onToggleInsights }: {
+function RepositorySummary({ result, modelRoles, highlighted, onHover, onRevealFile, insightsOpen, onToggleInsights }: {
   result: ParseResult;
+  modelRoles: Record<string, ModelRole>;
   highlighted: (path: string) => boolean;
   onHover: (hover: Hover) => void;
   onRevealFile: (path: string) => void;
@@ -196,6 +207,7 @@ function RepositorySummary({ result, highlighted, onHover, onRevealFile, insight
         <Stat label="Imports" value={`${result.coverage.resolved} resolved / ${result.coverage.total} found`} />
         <Stat label="Routes" value={result.routes.length} />
         <Stat label="Unidentified" value={unidentified} />
+        <Stat label="Labelled by model" value={Object.keys(modelRoles).length} />
       </div>
 
       <SectionHeading>Routes · {result.routes.length}</SectionHeading>
@@ -309,11 +321,12 @@ function WalkResults({ adjacency, path, direction, highlighted, onHover, onRevea
   );
 }
 
-function FileStructure({ path, result, groups, adjacency, highlighted, onHover, onRevealFile }: {
+function FileStructure({ path, result, groups, adjacency, modelRoles, highlighted, onHover, onRevealFile }: {
   path: string;
   result: ParseResult;
   groups: GraphGroup[];
   adjacency: Adjacency;
+  modelRoles: Record<string, ModelRole>;
   highlighted: (file: string) => boolean;
   onHover: (hover: Hover) => void;
   onRevealFile: (file: string) => void;
@@ -338,7 +351,19 @@ function FileStructure({ path, result, groups, adjacency, highlighted, onHover, 
         </div>
         <Stat label="Lines" value={file.lines} />
         <Stat label="Folder" value={group?.label ?? "—"} title={group?.path} />
-        <Stat label="Role" value={categoriesFor(result.adapter).find((category) => category.role === file.role)?.label ?? "—"} />
+        <Stat
+          label="Role"
+          value={
+            categoriesFor(result.adapter).find((category) => category.role === file.role)?.label ??
+            (modelRoles[path] !== undefined ? (
+              <>
+                {modelRoles[path]} <span className="text-(--text-faint)">· model</span>
+              </>
+            ) : (
+              "—"
+            ))
+          }
+        />
       </div>
 
       <div className="mt-2 flex gap-1">
@@ -423,10 +448,89 @@ function ModuleStructure({ group, result }: { group: GraphGroup; result: ParseRe
   );
 }
 
-export function DetailPane({ result, groups, selection, hover, tab, onTabChange, onHover, onRevealFile, insightsOpen, onToggleInsights }: DetailPaneProps) {
+function StalenessNotice({ staleness, analysisId }: { staleness: Staleness; analysisId: string }) {
+  const short = (sha: string) => sha.slice(0, 7);
+  if (staleness.state === "unknown") {
+    return <p className="mt-2 px-1 font-mono text-[10px] leading-4 text-(--text-faint)">Couldn&apos;t check for changes: {staleness.reason}</p>;
+  }
+  if (staleness.state === "fresh") return null;
+
+  const notice =
+    staleness.state === "file-changed"
+      ? `This file changed since commit ${short(staleness.analysed)} was analysed.`
+      : staleness.state === "file-removed"
+        ? `This file no longer exists at ${short(staleness.head)}.`
+        : `The repository has moved past ${short(staleness.analysed)} (now ${short(staleness.head)}).`;
+
+  return (
+    <div className="mt-2 flex flex-col gap-1.5 border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
+      <p className="font-mono text-[10px] leading-4 text-amber-700 dark:text-amber-300">{notice}</p>
+      <form action={reanalyzeRepository}>
+        <input name="analysisId" type="hidden" value={analysisId} />
+        <button
+          className="border border-amber-600/40 px-2 py-0.5 font-mono text-[10px] leading-4 text-amber-800 hover:bg-amber-500/20 dark:border-amber-400/40 dark:text-amber-200"
+          type="submit"
+        >
+          Re-analyse
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ExplanationPane({ target, state, filePaths, groupByPath, onExplain, onRevealFile, onRevealGroup, analysisId, tracing }: {
+  target: ExplainTarget;
+  state: ExplanationState | undefined;
+  filePaths: ReadonlySet<string>;
+  groupByPath: ReadonlyMap<string, GraphGroup>;
+  onExplain: (target: ExplainTarget) => void;
+  onRevealFile: (path: string) => void;
+  onRevealGroup: (group: GraphGroup) => void;
+  analysisId: string;
+  tracing: TracingStatus;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-3">
+      <div>
+        <button
+          className="border border-zinc-300 px-2 py-0.5 font-mono text-[10px] leading-4 text-zinc-700 enabled:hover:bg-zinc-100 disabled:text-zinc-400 dark:border-zinc-700 dark:text-zinc-300 dark:enabled:hover:bg-zinc-800"
+          disabled={state?.state === "loading"}
+          type="button"
+          onClick={() => onExplain(target)}
+        >
+          {state?.state === "loading" ? "Explaining…" : "Explain"}
+        </button>
+      </div>
+      {state === undefined ? (
+        <p className="mt-2 px-1 font-mono text-[10px] leading-4 text-(--text-faint)">No explanation yet.</p>
+      ) : state.state === "error" ? (
+        <p className="mt-2 px-1 font-mono text-[10px] leading-4 text-rose-600 dark:text-rose-400">{state.message}</p>
+      ) : state.state === "done" ? (
+        <div className="mt-2">
+          <ExplanationText
+            filePaths={filePaths}
+            groupByPath={groupByPath}
+            onRevealFile={onRevealFile}
+            onRevealGroup={onRevealGroup}
+            text={state.text}
+          />
+          {state.cached ? <p className="mt-2 px-1 font-mono text-[10px] leading-4 text-(--text-faint)">cached</p> : null}
+          <StalenessNotice analysisId={analysisId} staleness={state.staleness} />
+        </div>
+      ) : null}
+      <p className="mt-auto px-1 pt-3 font-mono text-[10px] leading-4 text-(--text-faint)">
+        {tracing.enabled ? `traced · LangSmith project ${tracing.project}` : `tracing off: ${tracing.reason} — calls are not recorded`}
+      </p>
+    </div>
+  );
+}
+
+export function DetailPane({ result, groups, selection, hover, tab, onTabChange, onHover, onRevealFile, onRevealGroup, insightsOpen, onToggleInsights, analysisId, modelRoles, explanations, onExplain, tracing }: DetailPaneProps) {
   // The walk only reads edges, so one adjacency build makes every click
   // synchronous — no spinner, no fetch.
   const adjacency = useMemo(() => buildAdjacency(result.edges), [result.edges]);
+  const filePaths = useMemo(() => new Set(result.files.map((file) => file.path)), [result.files]);
+  const groupByPath = useMemo(() => new Map(groups.map((group) => [group.path, group])), [groups]);
   const highlighted = (path: string) =>
     (hover?.kind === "file" && hover.path === path) ||
     (hover?.kind === "module" && groups.find((group) => group.id === hover.id)?.files.includes(path) === true);
@@ -443,6 +547,7 @@ export function DetailPane({ result, groups, selection, hover, tab, onTabChange,
           <RepositorySummary
             highlighted={highlighted}
             insightsOpen={insightsOpen}
+            modelRoles={modelRoles}
             onHover={onHover}
             onRevealFile={onRevealFile}
             onToggleInsights={onToggleInsights}
@@ -464,9 +569,17 @@ export function DetailPane({ result, groups, selection, hover, tab, onTabChange,
             ))}
           </div>
           {tab === "explanation" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-              <p className="px-1 font-mono text-[10px] leading-4 text-(--text-faint)">No explanation yet.</p>
-            </div>
+            <ExplanationPane
+              analysisId={analysisId}
+              filePaths={filePaths}
+              groupByPath={groupByPath}
+              onExplain={onExplain}
+              onRevealFile={onRevealFile}
+              onRevealGroup={onRevealGroup}
+              state={explanations.get(explainTargetKey(selection.kind === "file" ? { kind: "file", path: selection.path } : { kind: "module", id: selection.id }))}
+              target={selection.kind === "file" ? { kind: "file", path: selection.path } : { kind: "module", id: selection.id }}
+              tracing={tracing}
+            />
           ) : selection.kind === "file" ? (
             // Keyed on path so the active walk resets with the selected file.
             <FileStructure
@@ -474,6 +587,7 @@ export function DetailPane({ result, groups, selection, hover, tab, onTabChange,
               groups={groups}
               key={selection.path}
               highlighted={highlighted}
+              modelRoles={modelRoles}
               onHover={onHover}
               onRevealFile={onRevealFile}
               path={selection.path}

@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
-import { runAnalysis, startAnalysis } from "../lib/pipeline/index.ts";
-import { printParseReport } from "../lib/parser/print.ts";
+
+// Loaded before the pipeline is imported: the LangSmith client reads its key
+// at construction, and a static import would build it with no key (403s).
+if (existsSync(".env.local")) process.loadEnvFile(".env.local");
+const { runAnalysis, startAnalysis } = await import("../lib/pipeline/index.ts");
+const { printParseReport } = await import("../lib/parser/print.ts");
 
 function usage(): never {
   console.error("Usage: npm run analyze -- <github-url> --org <organization_id>");
@@ -12,8 +16,6 @@ const url = args.find((arg) => !arg.startsWith("--"));
 const orgIndex = args.indexOf("--org");
 const organizationId = orgIndex === -1 ? undefined : args[orgIndex + 1];
 if (!url || !organizationId) usage();
-
-if (existsSync(".env.local")) process.loadEnvFile(".env.local");
 
 const { analysisId, existing } = await startAnalysis(organizationId, url);
 if (existing) {

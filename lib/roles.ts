@@ -26,6 +26,18 @@ export type FileRole =
   | "config"
   | "test";
 
+// Roles the model may assign to files no convention identified — a deliberately
+// narrower set than FileRole: structural roles (page, route, controller, ...)
+// drive the route table and entry-point colouring, so convention owns them and
+// the classifier can never emit them.
+export type ModelRole = "service" | "repository" | "model" | "util" | "config" | "component" | "hook";
+
+export const MODEL_ROLES: readonly ModelRole[] = ["service", "repository", "model", "util", "config", "component", "hook"];
+
+export function isModelRole(role: string): role is ModelRole {
+  return MODEL_ROLES.some((known) => known === role);
+}
+
 export type AdapterName = "nestjs" | "nextjs" | "express" | "react" | "fallback";
 
 export type RouteMethod = "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS" | "ALL" | "SEARCH" | "PAGE";
