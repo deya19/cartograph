@@ -44,6 +44,10 @@ const apiHeaders = {
   "User-Agent": "cartograph",
 };
 
+const HEAD_SHA_CACHE_TTL_MS = 30_000;
+const HEAD_SHA_CACHE_LIMIT = 256;
+const headShaCache = new Map<string, { promise: Promise<string>; expiresAt: number }>();
+
 function rateLimitError(response: Response): Error | null {
   const limited = response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0");
   if (!limited) return null;
@@ -56,7 +60,8 @@ function rateLimitError(response: Response): Error | null {
 // keeps a leading U+FEFF and the parser hashes that string, so stripping the
 // BOM here would break the content-hash comparison.
 export async function fetchRawFile(owner: string, repo: string, ref: string, path: string): Promise<{ status: number; text: string | null }> {
-  const response = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path}`);
+  const encodedPath = path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  const response = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${encodedPath}`);
   if (!response.ok) return { status: response.status, text: null };
   const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(await response.arrayBuffer());
   return { status: response.status, text };
@@ -65,15 +70,41 @@ export async function fetchRawFile(owner: string, repo: string, ref: string, pat
 // HEAD of the default branch as a bare sha — the staleness check compares it
 // against the analysed commit.
 export async function fetchHeadSha(owner: string, repo: string, defaultBranch: string): Promise<string> {
-  const shaResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`, {
-    headers: { Accept: "application/vnd.github.sha", "User-Agent": "cartograph" },
-  });
-  const rateLimited = rateLimitError(shaResponse);
-  if (rateLimited) throw rateLimited;
-  if (!shaResponse.ok) {
-    throw new Error(`Could not resolve ${owner}/${repo}@${defaultBranch}: GitHub API error ${shaResponse.status}`);
+  const key = `${owner.toLowerCase()}/${repo.toLowerCase()}/${defaultBranch}`;
+  const now = Date.now();
+  const cached = headShaCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    headShaCache.delete(key);
+    headShaCache.set(key, cached);
+    return cached.promise;
   }
-  return (await shaResponse.text()).trim();
+
+  headShaCache.delete(key);
+  const promise = (async () => {
+    const shaResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`, {
+      headers: { Accept: "application/vnd.github.sha", "User-Agent": "cartograph" },
+    });
+    const rateLimited = rateLimitError(shaResponse);
+    if (rateLimited) throw rateLimited;
+    if (!shaResponse.ok) {
+      throw new Error(`Could not resolve ${owner}/${repo}@${defaultBranch}: GitHub API error ${shaResponse.status}`);
+    }
+    return (await shaResponse.text()).trim();
+  })();
+  const entry = { promise, expiresAt: now + HEAD_SHA_CACHE_TTL_MS };
+  headShaCache.set(key, entry);
+  while (headShaCache.size > HEAD_SHA_CACHE_LIMIT) {
+    const oldestKey = headShaCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    headShaCache.delete(oldestKey);
+  }
+
+  try {
+    return await promise;
+  } catch (error) {
+    if (headShaCache.get(key) === entry) headShaCache.delete(key);
+    throw error;
+  }
 }
 
 // Resolves the repo's default branch to a commit sha, then downloads and

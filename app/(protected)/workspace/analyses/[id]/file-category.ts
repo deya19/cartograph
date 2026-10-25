@@ -21,7 +21,7 @@ export type Staleness =
 // a selection keeps what was fetched — a cache you can't feel isn't a cache.
 export type ExplanationState =
   | { state: "loading" }
-  | { state: "done"; text: string; cached: boolean; staleness: Staleness }
+  | { state: "done"; text: string; cached: boolean; staleness: Staleness | null }
   | { state: "error"; message: string };
 
 export type FileCategory = { name: string; color: string };

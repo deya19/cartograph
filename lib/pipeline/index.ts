@@ -10,6 +10,8 @@ import { flushTraces } from "../ai/client.ts";
 import { createPipelineClient } from "./client.ts";
 import { canonicalUrl, fetchArchive, parseGitHubUrl } from "./github.ts";
 
+const SOURCE_READ_BATCH_SIZE = 32;
+
 export async function startAnalysis(organizationId: string, url: string): Promise<{ analysisId: string; existing: boolean }> {
   const parsed = parseGitHubUrl(url);
   if (!parsed) throw new Error(`Not a GitHub repository URL: ${url}`);
@@ -135,13 +137,19 @@ export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, m
     const modelRoles = new Map<string, ModelRole>();
     await mark("labelling", `Labelling ${unidentified.length} unidentified files`);
     if (unidentified.length > 0) {
-      const sources = await Promise.all(
-        unidentified.map(async (file) => ({
-          path: file.path,
-          sha256: file.sha256,
-          source: await readFile(path.join(extractedDir, file.path), "utf8"),
-        })),
-      );
+      const sources = [];
+      for (let index = 0; index < unidentified.length; index += SOURCE_READ_BATCH_SIZE) {
+        const batch = unidentified.slice(index, index + SOURCE_READ_BATCH_SIZE);
+        sources.push(
+          ...(await Promise.all(
+            batch.map(async (file) => ({
+              path: file.path,
+              sha256: file.sha256,
+              source: await readFile(path.join(extractedDir, file.path), "utf8"),
+            })),
+          )),
+        );
+      }
       for (const [filePath, role] of await classifyFiles({ client, organizationId: analysis.organization_id, files: sources })) {
         modelRoles.set(filePath, role);
       }

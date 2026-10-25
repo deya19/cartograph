@@ -5,10 +5,9 @@ import { auth } from "@clerk/nextjs/server";
 import { after } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { loadAnalysis, loadResult, UUID_PATTERN } from "@/lib/analysis/load";
-import { explainFile, explainFolder, type ExplainContext } from "@/lib/ai/explain";
+import { explainFile, explainFolder } from "@/lib/ai/explain";
 import { flushTraces } from "@/lib/ai/client";
 import { fetchHeadSha, fetchRawFile, parseGitHubUrl } from "@/lib/pipeline/github";
-import type { ModelRole } from "@/lib/roles";
 
 export type ExplainTarget = { kind: "file"; path: string } | { kind: "module"; id: string };
 
@@ -21,37 +20,43 @@ export type StalenessResult =
   | { state: "file-removed"; analysed: string; head: string }
   | { state: "unknown"; reason: string };
 
-// Loads the analysis, the stored result and the repository coordinates every
-// action needs. RLS returns no row for another organization's analysis, which
-// is the same "not yours" answer everywhere else.
-async function loadContext(analysisId: string): Promise<{
-  context: Omit<ExplainContext, "result" | "modelRoles"> | null;
-  result: Awaited<ReturnType<typeof loadResult>>["result"] | null;
-  modelRoles: Record<string, ModelRole>;
-  defaultBranch: string | null;
-}> {
+// RLS returns no row for another organization's analysis, matching the app's
+// usual "not yours" response.
+async function loadAnalysisContext(analysisId: string) {
   const { orgId } = await auth();
-  if (!orgId || !UUID_PATTERN.test(analysisId)) {
-    return { context: null, result: null, modelRoles: {}, defaultBranch: null };
-  }
+  if (!orgId || !UUID_PATTERN.test(analysisId)) return null;
 
   const supabase = await createSupabaseServerClient();
   const analysis = await loadAnalysis(supabase, analysisId);
-  if (!analysis || analysis.status !== "complete" || !analysis.commit_sha || !analysis.project) {
-    return { context: null, result: null, modelRoles: {}, defaultBranch: null };
-  }
+  if (!analysis || analysis.status !== "complete" || !analysis.commit_sha || !analysis.project) return null;
 
   const repository = parseGitHubUrl(analysis.project.repository_url);
-  if (!repository) {
-    return { context: null, result: null, modelRoles: {}, defaultBranch: null };
-  }
+  if (!repository) return null;
 
-  const { result, modelRoles } = await loadResult(supabase, analysis);
   return {
-    context: { client: supabase, organizationId: orgId, repository, commitSha: analysis.commit_sha },
+    client: supabase,
+    organizationId: orgId,
+    repository,
+    commitSha: analysis.commit_sha,
+    defaultBranch: analysis.project.default_branch,
+    analysis,
+  };
+}
+
+async function loadContext(analysisId: string) {
+  const base = await loadAnalysisContext(analysisId);
+  if (!base) return { context: null, result: null, modelRoles: {}, defaultBranch: null };
+  const { result, modelRoles } = await loadResult(base.client, base.analysis);
+  return {
+    context: {
+      client: base.client,
+      organizationId: base.organizationId,
+      repository: base.repository,
+      commitSha: base.commitSha,
+    },
     result,
     modelRoles,
-    defaultBranch: analysis.project.default_branch,
+    defaultBranch: base.defaultBranch,
   };
 }
 
@@ -75,20 +80,27 @@ export async function explainTarget(analysisId: string, target: ExplainTarget): 
 
 export async function checkStaleness(analysisId: string, target: ExplainTarget): Promise<StalenessResult> {
   try {
-    const { context, result, defaultBranch } = await loadContext(analysisId);
-    if (!context || !result) return { state: "unknown", reason: "analysis is not available" };
-    if (!defaultBranch) return { state: "unknown", reason: "the repository's default branch is not recorded" };
+    const base = await loadAnalysisContext(analysisId);
+    if (!base) return { state: "unknown", reason: "analysis is not available" };
+    if (!base.defaultBranch) return { state: "unknown", reason: "the repository's default branch is not recorded" };
 
-    const analysed = context.commitSha;
-    const head = await fetchHeadSha(context.repository.owner, context.repository.repo, defaultBranch);
+    const analysed = base.commitSha;
+    const head = await fetchHeadSha(base.repository.owner, base.repository.repo, base.defaultBranch);
     if (head === analysed) return { state: "fresh" };
 
     if (target.kind === "module") return { state: "repo-moved", analysed, head };
 
-    const file = result.files.find((entry) => entry.path === target.path);
+    const { data, error } = await base.client
+      .from("files")
+      .select("sha256")
+      .eq("analysis_id", analysisId)
+      .eq("path", target.path)
+      .maybeSingle();
+    if (error) throw new Error(`Could not load file hash: ${error.message}`);
+    const file = data as { sha256: string } | null;
     if (!file) return { state: "unknown", reason: "file is not in this analysis" };
 
-    const { status, text } = await fetchRawFile(context.repository.owner, context.repository.repo, head, target.path);
+    const { status, text } = await fetchRawFile(base.repository.owner, base.repository.repo, head, target.path);
     if (status === 404) return { state: "file-removed", analysed, head };
     if (text === null) return { state: "unknown", reason: `GitHub returned HTTP ${status} for the current file` };
 

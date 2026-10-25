@@ -448,7 +448,10 @@ function ModuleStructure({ group, result }: { group: GraphGroup; result: ParseRe
   );
 }
 
-function StalenessNotice({ staleness, analysisId }: { staleness: Staleness; analysisId: string }) {
+function StalenessNotice({ staleness, analysisId }: { staleness: Staleness | null; analysisId: string }) {
+  if (staleness === null) {
+    return <p className="mt-2 px-1 font-mono text-[10px] leading-4 text-(--text-faint)">Checking for changes…</p>;
+  }
   const short = (sha: string) => sha.slice(0, 7);
   if (staleness.state === "unknown") {
     return <p className="mt-2 px-1 font-mono text-[10px] leading-4 text-(--text-faint)">Couldn&apos;t check for changes: {staleness.reason}</p>;
