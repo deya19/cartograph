@@ -16,7 +16,9 @@ import type { Edge as FlowEdge, Node, NodeProps } from "@xyflow/react";
 import { graphlib, layout } from "@dagrejs/dagre";
 import "@xyflow/react/dist/style.css";
 import type { Coverage, ParseResult } from "@/lib/parser/types";
-import { categoriesFor } from "@/lib/roles";
+import { categoriesFor, type ModelRole } from "@/lib/roles";
+import type { TracingStatus } from "@/lib/ai/client";
+import { checkStaleness, explainTarget } from "./actions";
 import { useResolvedTheme } from "@/components/use-resolved-theme";
 import {
   PANEL_ROWS,
@@ -27,13 +29,22 @@ import {
   type VisibleItem,
 } from "@/lib/graph";
 import { DetailPane, type DetailsTab } from "./detail-pane";
-import { fileCategory, type FileCategory, type Hover, type Selection } from "./file-category";
+import { fileCategory, explainTargetKey, type ExplanationState, type ExplainTarget, type FileCategory, type Hover, type Selection, type Staleness } from "./file-category";
 
 // The rail filters by role; colour still means file kind everywhere else.
 type RoleFilter = { key: string; label: string };
 
+function rejectionMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return fallback;
+}
+
 type MapCanvasProps = {
   result: ParseResult;
+  analysisId: string;
+  modelRoles: Record<string, ModelRole>;
+  tracing: TracingStatus;
 };
 
 type ModuleNodeData = {
@@ -490,7 +501,7 @@ function CoverageBanner({ coverage, skipped }: { coverage: Coverage; skipped: nu
   );
 }
 
-export function MapCanvas({ result }: MapCanvasProps) {
+export function MapCanvas({ result, analysisId, modelRoles, tracing }: MapCanvasProps) {
   const groups = useMemo(() => foldModules(result), [result]);
   const categoryByFile = useMemo(
     () => new Map(result.files.map((file) => [file.path, fileCategory(file.extension)])),
@@ -519,6 +530,52 @@ export function MapCanvas({ result }: MapCanvasProps) {
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [expandedVersion, setExpandedVersion] = useState(0);
   const [offsets, setOffsets] = useState<ReadonlyMap<string, number>>(new Map());
+  // Keyed "file:<path>" / "module:<id>" so a fetched explanation survives
+  // moving the selection away and back without a second click.
+  const [explanations, setExplanations] = useState<ReadonlyMap<string, ExplanationState>>(new Map());
+
+  const handleExplain = useCallback(
+    (target: ExplainTarget) => {
+      const key = explainTargetKey(target);
+      setExplanations((current) => new Map(current).set(key, { state: "loading" }));
+
+      let staleness: Staleness | null = null;
+      void explainTarget(analysisId, target).then(
+        (explanation) => {
+          const checkedStaleness = staleness;
+          setExplanations((current) => {
+            const next = new Map(current);
+            next.set(
+              key,
+              explanation.ok
+                ? { state: "done", text: explanation.text, cached: explanation.cached, staleness: checkedStaleness }
+                : { state: "error", message: explanation.error },
+            );
+            return next;
+          });
+        },
+        (error: unknown) => {
+          const message = rejectionMessage(error, "Could not load the explanation.");
+          setExplanations((current) => new Map(current).set(key, { state: "error", message }));
+        },
+      );
+      const updateStaleness = (result: Staleness) => {
+        staleness = result;
+        setExplanations((current) => {
+          const existing = current.get(key);
+          if (!existing || existing.state !== "done") return current;
+          const next = new Map(current);
+          next.set(key, { ...existing, staleness: result });
+          return next;
+        });
+      };
+      void checkStaleness(analysisId, target).then(
+        updateStaleness,
+        (error: unknown) => updateStaleness({ state: "unknown", reason: rejectionMessage(error, "Could not check for changes.") }),
+      );
+    },
+    [analysisId],
+  );
 
   const handleToggle = useCallback((group: GraphGroup, opening: boolean) => {
     setExpanded((current) => {
@@ -649,16 +706,22 @@ export function MapCanvas({ result }: MapCanvasProps) {
           </ReactFlowProvider>
         </section>
         <DetailPane
+          analysisId={analysisId}
+          explanations={explanations}
           groups={groups}
           hover={hover}
           insightsOpen={insightsOpen}
+          modelRoles={modelRoles}
+          onExplain={handleExplain}
           onHover={setHover}
           onRevealFile={handleRevealFile}
+          onRevealGroup={(group) => handleToggle(group, true)}
           onTabChange={setDetailsTab}
           onToggleInsights={() => setInsightsOpen((open) => !open)}
           result={result}
           selection={selection}
           tab={detailsTab}
+          tracing={tracing}
         />
       </div>
     </main>

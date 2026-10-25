@@ -1,11 +1,16 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseSelection, selectFiles } from "../parser/index.ts";
 import type { Coverage, ParseResult } from "../parser/types.ts";
+import type { ModelRole } from "../roles.ts";
 import type { Stage } from "../analysis-stage.ts";
+import { classifyFiles } from "../ai/classify.ts";
+import { flushTraces } from "../ai/client.ts";
 import { createPipelineClient } from "./client.ts";
 import { canonicalUrl, fetchArchive, parseGitHubUrl } from "./github.ts";
+
+const SOURCE_READ_BATCH_SIZE = 32;
 
 export async function startAnalysis(organizationId: string, url: string): Promise<{ analysisId: string; existing: boolean }> {
   const parsed = parseGitHubUrl(url);
@@ -124,6 +129,33 @@ export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, m
     result.summary.filesSkipped += fetched.notExtracted.length;
     await mark("parsing", `Parsed ${result.summary.filesParsed} files, ${result.edges.length} edges`);
 
+    // Labelling reads the extracted sources, so it runs while tempDir exists —
+    // between parsing and storing. The model may only emit non-structural
+    // roles; anything an adapter identified keeps its convention role.
+    const extractedDir = tempDir;
+    const unidentified = result.files.filter((file) => file.role === null);
+    const modelRoles = new Map<string, ModelRole>();
+    await mark("labelling", `Labelling ${unidentified.length} unidentified files`);
+    if (unidentified.length > 0) {
+      const sources = [];
+      for (let index = 0; index < unidentified.length; index += SOURCE_READ_BATCH_SIZE) {
+        const batch = unidentified.slice(index, index + SOURCE_READ_BATCH_SIZE);
+        sources.push(
+          ...(await Promise.all(
+            batch.map(async (file) => ({
+              path: file.path,
+              sha256: file.sha256,
+              source: await readFile(path.join(extractedDir, file.path), "utf8"),
+            })),
+          )),
+        );
+      }
+      for (const [filePath, role] of await classifyFiles({ client, organizationId: analysis.organization_id, files: sources })) {
+        modelRoles.set(filePath, role);
+      }
+    }
+    await mark("labelling", `Labelled ${modelRoles.size} files`);
+
     await mark("storing", "Storing results");
     // A retry replaces rather than appends; the cascade clears old edges.
     const { error: deleteError } = await client.from("files").delete().eq("analysis_id", analysisId);
@@ -145,6 +177,15 @@ export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, m
       const { data, error } = await client.from("files").insert(batch).select("id, path");
       if (error) throw new Error(`Failed to insert files: ${error.message}`);
       for (const row of (data ?? []) as Array<{ id: string; path: string }>) fileIds.set(row.path, row.id);
+    }
+
+    const roleRows = [...modelRoles].flatMap(([filePath, role]) => {
+      const fileId = fileIds.get(filePath);
+      return fileId ? [{ organization_id: analysis.organization_id, analysis_id: analysisId, file_id: fileId, role }] : [];
+    });
+    for (let index = 0; index < roleRows.length; index += 1000) {
+      const { error } = await client.from("file_roles").insert(roleRows.slice(index, index + 1000));
+      if (error) throw new Error(`Failed to insert file roles: ${error.message}`);
     }
 
     const edgeRows = result.edges.map((edge) => {
@@ -205,6 +246,9 @@ export async function runAnalysis(analysisId: string, onStage?: (stage: Stage, m
     throw error;
   } finally {
     if (tempDir) await rm(tempDir, { recursive: true, force: true });
+    // Traced runs are batched; without the flush a finished run loses them.
+    // Flushing must never mask the run's own outcome.
+    await flushTraces().catch((error: unknown) => console.error("Failed to flush LangSmith traces:", error));
   }
 }
 

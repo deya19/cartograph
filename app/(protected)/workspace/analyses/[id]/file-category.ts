@@ -4,6 +4,26 @@ export type Selection = { kind: "module"; id: string } | { kind: "file"; path: s
 
 export type Hover = { kind: "file"; path: string } | { kind: "module"; id: string } | null;
 
+export type ExplainTarget = { kind: "file"; path: string } | { kind: "module"; id: string };
+
+export function explainTargetKey(target: ExplainTarget): string {
+  return target.kind === "file" ? `file:${target.path}` : `module:${target.id}`;
+}
+
+export type Staleness =
+  | { state: "fresh" }
+  | { state: "repo-moved"; analysed: string; head: string }
+  | { state: "file-changed"; analysed: string; head: string }
+  | { state: "file-removed"; analysed: string; head: string }
+  | { state: "unknown"; reason: string };
+
+// Per-target explanation state held by the canvas so leaving and returning to
+// a selection keeps what was fetched — a cache you can't feel isn't a cache.
+export type ExplanationState =
+  | { state: "loading" }
+  | { state: "done"; text: string; cached: boolean; staleness: Staleness | null }
+  | { state: "error"; message: string };
+
 export type FileCategory = { name: string; color: string };
 
 // Colour means file kind (project doc §colour); anything unmapped is grey.
