@@ -98,6 +98,7 @@ const PRODUCT_NAME = /^[A-Z][A-Za-z]*\.js$/;
 
 function isPathShaped(token: string): boolean {
   if (PRODUCT_NAME.test(token)) return false;
+  if (token.includes("/")) return /[^./]/.test(token);
   const dot = token.lastIndexOf(".");
   if (dot <= 0) return false;
   if (!SOURCE_EXTENSIONS.includes(token.slice(dot))) return false;
@@ -110,9 +111,9 @@ export type InventedPathsResult = { checked: string[]; invented: string[] };
 // Tokens are cut and trimmed exactly as the renderer does
 // (explanation-text.tsx): prose wraps paths in punctuation, so both ends are
 // stripped — stopping early when the remainder already matches a shown path.
-// Folder paths (no extension) are never checked: the check answers "did the
-// model name a file we didn't show it", and a bare directory can't be told
-// from a product or identifier without more signal than a token gives.
+// Slash-containing paths are checked even without a source extension. A
+// single-segment token still needs a known extension to distinguish it from
+// ordinary prose.
 export function findInventedPaths(text: string, shown: Set<string>, base: string | null): InventedPathsResult {
   const checked = new Set<string>();
   const invented = new Set<string>();
