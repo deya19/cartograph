@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "parse": "node --experimental-strip-types scripts/parse-repository.mts",
-    "analyze": "node --experimental-strip-types scripts/analyze-repository.mts"
+    "analyze": "node --experimental-strip-types scripts/analyze-repository.mts",
+    "eval:roles": "node --experimental-strip-types evals/roles.mts",
+    "eval:prompts": "node --experimental-strip-types evals/prompts.mts",
+    "eval:paths": "node --experimental-strip-types evals/invented-paths.mts"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.9.14",

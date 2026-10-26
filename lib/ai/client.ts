@@ -1,7 +1,7 @@
 import { OpenAI } from "openai";
 import { Client } from "langsmith";
 import { wrapOpenAI } from "langsmith/wrappers/openai";
-import { traceable } from "langsmith/traceable";
+import { traceable, getCurrentRunTree } from "langsmith/traceable";
 
 // Pinned to a snapshot, never an alias: the model name is part of every cache
 // key, so re-pinning invalidates only this model's cache.
@@ -82,6 +82,18 @@ export function traced<I extends Record<string, unknown>, R>(name: string, input
     { name, client, run_type: "chain" },
   );
   return wrapped(inputs);
+}
+
+// Live evaluator: feedback on the run currently being traced. Nothing when
+// tracing is off or no run is active, and a LangSmith failure is logged rather
+// than thrown — a judge must never fail the answer it is judging.
+export function recordFeedback(key: string, score: number, comment: string): void {
+  if (!tracingStatus().enabled) return;
+  const run = getCurrentRunTree(true);
+  if (!run) return;
+  client.createFeedback(run.id, key, { score, comment }).catch((error: unknown) => {
+    console.error(`Could not record ${key} feedback: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 export async function flushTraces(): Promise<void> {

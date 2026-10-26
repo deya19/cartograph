@@ -6,9 +6,10 @@ import type { Neighbour } from "../graph.ts";
 import { fetchRawFile } from "../pipeline/github.ts";
 import type { FileRecord, ParseResult } from "../parser/types.ts";
 import type { ModelRole } from "../roles.ts";
-import { MODEL, openai, traced } from "./client.ts";
+import { MODEL, openai, recordFeedback, traced } from "./client.ts";
 import { cacheKey, readCache, writeCache } from "./cache.ts";
-import { FILE_EXPLANATION_SYSTEM, FOLDER_EXPLANATION_SYSTEM, PROMPT_VERSION } from "./prompts.ts";
+import { findInventedPaths, scorePaths, shownPaths } from "./invented-paths.ts";
+import { FILE_EXPLANATION_SYSTEM, FOLDER_EXPLANATION_SYSTEM, PROMPT_VERSIONS } from "./prompts.ts";
 
 export type ExplainContext = {
   client: SupabaseClient;
@@ -50,11 +51,68 @@ function roleFor(path: string, byPath: Map<string, FileRecord>, modelRoles: Reco
   return byPath.get(path)?.role ?? modelRoles[path] ?? "none";
 }
 
-function neighbourLines(neighbours: Neighbour[], byPath: Map<string, FileRecord>, modelRoles: Record<string, ModelRole>): string[] {
-  if (neighbours.length === 0) return ["- none"];
-  return neighbours.map(
-    (neighbour) => `- ${neighbour.path} (role: ${roleFor(neighbour.path, byPath, modelRoles)}; ${neighbour.kinds.join(", ")})`,
-  );
+// Records the invented-path check on the current run — inside the traced call
+// so the feedback lands on that run, hit or miss alike.
+function recordInventedPaths(runName: "explain-file" | "explain-folder", inputs: Record<string, unknown>, text: string): void {
+  const { paths, base } = shownPaths(runName, inputs);
+  const result = findInventedPaths(text, paths, base);
+  const comment =
+    result.invented.length === 0
+      ? "no invented paths"
+      : `invented: ${result.invented.join(", ")}`;
+  recordFeedback("invented_paths", scorePaths(result), comment);
+}
+
+export type FileExplanationUserParams = {
+  repository: string;
+  path: string;
+  role: string;
+  imports: Array<{ path: string; role: string; kinds: string[] }>;
+  importedBy: Array<{ path: string; role: string; kinds: string[] }>;
+  source: string;
+};
+
+// The user message exactly as the app sends it, factored out so the evals
+// build the same message rather than a lookalike. Truncation lives here so
+// the eval can't accidentally measure on a source the app never sends.
+export function fileExplanationUser({ repository, path, role, imports, importedBy, source }: FileExplanationUserParams): string {
+  if (source.length > SOURCE_CHAR_LIMIT) {
+    source = `${source.slice(0, SOURCE_CHAR_LIMIT)}\n[truncated: ${source.length - SOURCE_CHAR_LIMIT} more characters not shown]`;
+  }
+  const lines = (entries: Array<{ path: string; role: string; kinds: string[] }>): string[] =>
+    entries.length === 0 ? ["- none"] : entries.map((entry) => `- ${entry.path} (role: ${entry.role}; ${entry.kinds.join(", ")})`);
+
+  return [
+    `Repository: ${repository}`,
+    `File: ${path} (role: ${role})`,
+    "",
+    `Imports (${imports.length}):`,
+    ...lines(imports),
+    "",
+    `Imported by (${importedBy.length}):`,
+    ...lines(importedBy),
+    "",
+    `Source of ${path}:`,
+    "<<<",
+    source,
+    ">>>",
+  ].join("\n");
+}
+
+// Bare model call with no cache: the evals call this directly, because an
+// experiment measures the model — a cached answer would measure nothing.
+export async function generateFileExplanation(system: string, user: string): Promise<string> {
+  const completion = await openai.chat.completions.create({
+    model: MODEL,
+    reasoning_effort: "low",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+  const text = completion.choices[0]?.message.content;
+  if (!text) throw new Error("Model returned no explanation");
+  return text;
 }
 
 async function fetchSourceAtCommit(repository: { owner: string; repo: string }, commitSha: string, path: string, expectedSha256: string): Promise<string> {
@@ -81,7 +139,7 @@ export async function explainFile(context: ExplainContext & { path: string }): P
   const neighbours = fileNeighbours(path, result.edges);
   const key = cacheKey([
     "file-explanation",
-    PROMPT_VERSION,
+    PROMPT_VERSIONS.fileExplanation,
     MODEL,
     path,
     file.sha256,
@@ -89,62 +147,53 @@ export async function explainFile(context: ExplainContext & { path: string }): P
     neighbourKey(neighbours.importedBy),
   ]);
 
+  // Hoisted so the trace inputs and the invented-path check see the identical
+  // object — the check is only exact when it checks what the prompt showed.
+  const inputs = {
+    path,
+    hash: file.sha256,
+    role: file.role ?? modelRoles[path] ?? null,
+    imports: inputNeighbours(neighbours.imports, byPath, modelRoles),
+    importedBy: inputNeighbours(neighbours.importedBy, byPath, modelRoles),
+  };
+
   // The cache read lives inside the traced call: a hit must show up as a run
   // with no model call in it, otherwise a working cache looks like a broken one.
   return traced(
     "explain-file",
-    {
-      path,
-      hash: file.sha256,
-      role: file.role ?? modelRoles[path] ?? null,
-      imports: inputNeighbours(neighbours.imports, byPath, modelRoles),
-      importedBy: inputNeighbours(neighbours.importedBy, byPath, modelRoles),
-    },
+    inputs,
     async (): Promise<Explanation> => {
     const cached = await readCache(client, organizationId, [key]);
     const hit = cached.get(key);
     if (hit !== undefined) {
       markCache("hit");
+      recordInventedPaths("explain-file", inputs, hit);
       return { text: hit, cached: true };
     }
     markCache("miss");
 
-    let source = await fetchSourceAtCommit(repository, commitSha, path, file.sha256);
-    if (source.length > SOURCE_CHAR_LIMIT) {
-      source = `${source.slice(0, SOURCE_CHAR_LIMIT)}\n[truncated: ${source.length - SOURCE_CHAR_LIMIT} more characters not shown]`;
-    }
-
-    const role = file.role ?? modelRoles[path] ?? "none identified";
-    const user = [
-      `Repository: ${repository.owner}/${repository.repo}`,
-      `File: ${path} (role: ${role})`,
-      "",
-      `Imports (${neighbours.imports.length}):`,
-      ...neighbourLines(neighbours.imports, byPath, modelRoles),
-      "",
-      `Imported by (${neighbours.importedBy.length}):`,
-      ...neighbourLines(neighbours.importedBy, byPath, modelRoles),
-      "",
-      `Source of ${path}:`,
-      "<<<",
+    const source = await fetchSourceAtCommit(repository, commitSha, path, file.sha256);
+    const explain = (entries: Neighbour[]) =>
+      entries.map((neighbour) => ({
+        path: neighbour.path,
+        role: roleFor(neighbour.path, byPath, modelRoles),
+        kinds: neighbour.kinds,
+      }));
+    const user = fileExplanationUser({
+      repository: `${repository.owner}/${repository.repo}`,
+      path,
+      role: file.role ?? modelRoles[path] ?? "none identified",
+      imports: explain(neighbours.imports),
+      importedBy: explain(neighbours.importedBy),
       source,
-      ">>>",
-    ].join("\n");
-
-    const completion = await openai.chat.completions.create({
-      model: MODEL,
-      reasoning_effort: "low",
-      messages: [
-        { role: "system", content: FILE_EXPLANATION_SYSTEM },
-        { role: "user", content: user },
-      ],
     });
-    const text = completion.choices[0]?.message.content;
-    if (!text) throw new Error(`Model returned no explanation for ${path}`);
+
+    const text = await generateFileExplanation(FILE_EXPLANATION_SYSTEM, user);
 
     await writeCache(client, [
       { organization_id: organizationId, kind: "file-explanation", cache_key: key, content: text },
     ]);
+    recordInventedPaths("explain-file", inputs, text);
     return { text, cached: false };
     },
   );
@@ -185,7 +234,7 @@ export async function explainFolder(context: ExplainContext & { groupId: string 
 
   const key = cacheKey([
     "folder-explanation",
-    PROMPT_VERSION,
+    PROMPT_VERSIONS.folderExplanation,
     MODEL,
     group.path,
     group.files.map((path) => `${path}|${byPath.get(path)?.sha256 ?? ""}`).sort(),
@@ -198,19 +247,24 @@ export async function explainFolder(context: ExplainContext & { groupId: string 
     .sort((left, right) => left.target.localeCompare(right.target));
   const outgoing = [...outgoingCounts.entries()].sort(([left], [right]) => left.localeCompare(right));
 
+  // Same object the traced call records — the folder inputs apply the prompt's
+  // truncation limits identically, so the check sees what the model saw.
+  const inputs = {
+    folder: group.path,
+    files: group.files.map((path) => ({ path, role: inputRole(path, byPath, modelRoles), lines: byPath.get(path)?.lines ?? 0 })),
+    importedFrom: incoming.map(({ target, importers }) => ({ target, importers: importers.slice(0, TARGET_IMPORTERS_LIMIT) })),
+    importsOutside: outgoing.slice(0, OUTSIDE_IMPORTS_LIMIT).map(([path, count]) => ({ path, count })),
+  };
+
   return traced(
     "explain-folder",
-    {
-      folder: group.path,
-      files: group.files.map((path) => ({ path, role: inputRole(path, byPath, modelRoles), lines: byPath.get(path)?.lines ?? 0 })),
-      importedFrom: incoming.map(({ target, importers }) => ({ target, importers: importers.slice(0, TARGET_IMPORTERS_LIMIT) })),
-      importsOutside: outgoing.slice(0, OUTSIDE_IMPORTS_LIMIT).map(([path, count]) => ({ path, count })),
-    },
+    inputs,
     async (): Promise<Explanation> => {
     const cached = await readCache(client, organizationId, [key]);
     const hit = cached.get(key);
     if (hit !== undefined) {
       markCache("hit");
+      recordInventedPaths("explain-folder", inputs, hit);
       return { text: hit, cached: true };
     }
     markCache("miss");
@@ -266,6 +320,7 @@ export async function explainFolder(context: ExplainContext & { groupId: string 
     await writeCache(client, [
       { organization_id: organizationId, kind: "folder-explanation", cache_key: key, content: text },
     ]);
+    recordInventedPaths("explain-folder", inputs, text);
     return { text, cached: false };
     },
   );
