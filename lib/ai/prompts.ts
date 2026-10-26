@@ -1,5 +1,7 @@
-// Bumping this invalidates every cached answer built from these prompts.
-export const PROMPT_VERSION = "1";
+// One version per prompt, each part of its own cache key: bumping one
+// invalidates only the answers that prompt produced. File explanation is at 2;
+// version 1 is retired and kept, verbatim, with the evals that compare them.
+export const PROMPT_VERSIONS = { fileExplanation: "2", folderExplanation: "1", classification: "1" } as const;
 
 // Shared by both explanations. Formatting is permitted in a small subset and
 // rendered, rather than forbidden: models don't reliably obey a ban, and the
@@ -16,7 +18,13 @@ export const FILE_EXPLANATION_SYSTEM = `You explain one file in a TypeScript or 
 
 You are given the file's source, the complete list of files it imports, and the complete list of files that import it.
 
-Write two or three short paragraphs: what this file does, and the part it plays between the files that import it and the files it imports.
+Write two or three short paragraphs.
+
+First, what this file does: name the exports, functions or components that do the work, and say what they take and what they produce. Describe what is actually in this file, not what a file of its kind usually contains.
+
+Then the part it plays between its neighbours. For the files it imports, the import statements in the source show which names come from which file — say what this file takes from the ones that matter. For the files that import it you only know their path and role: say who they are, not what they do with it. When a list is long, name the few neighbours that matter most rather than listing them all.
+
+Leave out any sentence that would be equally true of another file in another repository.
 
 ${SHARED_RULES}`;
 
