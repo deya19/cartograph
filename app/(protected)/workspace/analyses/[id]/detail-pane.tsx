@@ -3,6 +3,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { fileCategories, fileCategory, explainTargetKey, type ExplanationState, type ExplainTarget, type Hover, type Selection, type Staleness } from "./file-category";
 import { ExplanationText } from "./explanation-text";
+import { AskPanel, type AskConversation } from "./ask-panel";
 import { reanalyzeRepository } from "../../actions";
 import type { TracingStatus } from "@/lib/ai/client";
 import type { ModelRole } from "@/lib/roles";
@@ -22,6 +23,7 @@ import type { ParseResult } from "@/lib/parser/types";
 import { categoriesFor, reachedRoles } from "@/lib/roles";
 
 export type DetailsTab = "structure" | "explanation";
+export type PaneMode = "overview" | "ask";
 
 type DetailPaneProps = {
   result: ParseResult;
@@ -40,6 +42,9 @@ type DetailPaneProps = {
   explanations: ReadonlyMap<string, ExplanationState>;
   onExplain: (target: ExplainTarget) => void;
   tracing: TracingStatus;
+  mode: PaneMode;
+  onModeChange: (mode: PaneMode) => void;
+  ask: AskConversation;
 };
 
 function Stat({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
@@ -528,7 +533,7 @@ function ExplanationPane({ target, state, filePaths, groupByPath, onExplain, onR
   );
 }
 
-export function DetailPane({ result, groups, selection, hover, tab, onTabChange, onHover, onRevealFile, onRevealGroup, insightsOpen, onToggleInsights, analysisId, modelRoles, explanations, onExplain, tracing }: DetailPaneProps) {
+export function DetailPane({ result, groups, selection, hover, tab, onTabChange, onHover, onRevealFile, onRevealGroup, insightsOpen, onToggleInsights, analysisId, modelRoles, explanations, onExplain, tracing, mode, onModeChange, ask }: DetailPaneProps) {
   // The walk only reads edges, so one adjacency build makes every click
   // synchronous — no spinner, no fetch.
   const adjacency = useMemo(() => buildAdjacency(result.edges), [result.edges]);
@@ -542,7 +547,28 @@ export function DetailPane({ result, groups, selection, hover, tab, onTabChange,
 
   return (
     <aside className="flex min-h-0 flex-col border-l border-zinc-200 bg-zinc-50/40 dark:border-zinc-800 dark:bg-zinc-950/20">
-      {selection === null ? (
+      <div className="flex border-b border-zinc-200 dark:border-zinc-800">
+        {(["overview", "ask"] as const).map((name) => (
+          <button
+            className={`px-4 py-2 font-mono text-[10px] uppercase tracking-[0.14em] ${mode === name ? "text-(--text-strong) shadow-[inset_0_-1px_0_var(--select)]" : "text-(--text-faint)"}`}
+            key={name}
+            type="button"
+            onClick={() => onModeChange(name)}
+          >
+            {name}
+          </button>
+        ))}
+      </div>
+      {mode === "ask" ? (
+        <AskPanel
+          conversation={ask}
+          filePaths={filePaths}
+          groupByPath={groupByPath}
+          onRevealFile={onRevealFile}
+          onRevealGroup={onRevealGroup}
+          selectedPath={selection?.kind === "file" ? selection.path : null}
+        />
+      ) : selection === null ? (
         <>
           <div className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">Details</p>

@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Compiled by `mda build` / `mda dev` from the agent project.
+    "cartograph-agent/.mda/**",
   ]),
 ]);
 
