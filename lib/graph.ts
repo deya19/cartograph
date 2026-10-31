@@ -1,4 +1,5 @@
 import type { Edge, EdgeKind, FileMetrics, FileRecord, FileRole, ParseResult } from "./parser/types";
+import type { ModelRole } from "./roles";
 
 export type GraphGroup = {
   id: string;
@@ -523,4 +524,58 @@ export function graphAcceptance(result: ParseResult, groups: GraphGroup[]): { no
     allNodesHaveMultipleFiles: groups.every((group) => group.files.length > 1),
     danglingEdges,
   };
+}
+
+export function searchFiles(files: FileRecord[], query: string): string[] {
+  const needle = query.toLowerCase();
+  return files
+    .filter((file) => file.path.toLowerCase().includes(needle))
+    .map((file) => file.path)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+export type RoleSource = "parser" | "model";
+
+// The parser's own role wins; a model role only applies where the parser left
+// the file unassigned. Same precedence as the explain path's inputRole.
+function effectiveRole(
+  file: FileRecord,
+  modelRoles: Record<string, ModelRole>,
+): { role: string; source: RoleSource } | null {
+  if (file.role !== null) return { role: file.role, source: "parser" };
+  const role = modelRoles[file.path];
+  if (role) return { role, source: "model" };
+  return null;
+}
+
+export function filesWithRole(
+  files: FileRecord[],
+  modelRoles: Record<string, ModelRole>,
+  role: string,
+): Array<{ path: string; source: RoleSource }> {
+  return files
+    .flatMap((file) => {
+      const effective = effectiveRole(file, modelRoles);
+      return effective?.role === role ? [{ path: file.path, source: effective.source }] : [];
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function rolesPresent(
+  files: FileRecord[],
+  modelRoles: Record<string, ModelRole>,
+): Array<{ role: string; files: number; source: RoleSource }> {
+  const parser = new Map<string, number>();
+  const model = new Map<string, number>();
+  for (const file of files) {
+    const effective = effectiveRole(file, modelRoles);
+    if (!effective) continue;
+    const counts = effective.source === "parser" ? parser : model;
+    counts.set(effective.role, (counts.get(effective.role) ?? 0) + 1);
+  }
+  const rows = (source: RoleSource, counts: Map<string, number>) =>
+    [...counts.entries()].map(([role, count]) => ({ role, files: count, source }));
+  return [...rows("parser", parser), ...rows("model", model)].sort((left, right) =>
+    left.role.localeCompare(right.role),
+  );
 }

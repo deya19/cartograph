@@ -28,7 +28,8 @@ import {
   type GraphGroup,
   type VisibleItem,
 } from "@/lib/graph";
-import { DetailPane, type DetailsTab } from "./detail-pane";
+import { DetailPane, type DetailsTab, type PaneMode } from "./detail-pane";
+import { useAskConversation } from "./ask-panel";
 import { fileCategory, explainTargetKey, type ExplanationState, type ExplainTarget, type FileCategory, type Hover, type Selection, type Staleness } from "./file-category";
 
 // The rail filters by role; colour still means file kind everywhere else.
@@ -525,6 +526,10 @@ export function MapCanvas({ result, analysisId, modelRoles, tracing }: MapCanvas
   const [selection, setSelection] = useState<Selection>(null);
   const [hover, setHover] = useState<Hover>(null);
   const [detailsTab, setDetailsTab] = useState<DetailsTab>("structure");
+  // Pane mode and the conversation live here so switching modes, tabs or
+  // selection never throws a thread away.
+  const [paneMode, setPaneMode] = useState<PaneMode>("overview");
+  const ask = useAskConversation(analysisId);
   const [activeFilter, setActiveFilter] = useState<RoleFilter | null>(null);
   // Lives here rather than in the summary so selecting a file doesn't lose it.
   const [insightsOpen, setInsightsOpen] = useState(false);
@@ -707,13 +712,16 @@ export function MapCanvas({ result, analysisId, modelRoles, tracing }: MapCanvas
         </section>
         <DetailPane
           analysisId={analysisId}
+          ask={ask}
           explanations={explanations}
           groups={groups}
           hover={hover}
           insightsOpen={insightsOpen}
+          mode={paneMode}
           modelRoles={modelRoles}
           onExplain={handleExplain}
           onHover={setHover}
+          onModeChange={setPaneMode}
           onRevealFile={handleRevealFile}
           onRevealGroup={(group) => handleToggle(group, true)}
           onTabChange={setDetailsTab}

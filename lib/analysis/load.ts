@@ -77,10 +77,13 @@ async function paged<Row>(read: (from: number, to: number) => PromiseLike<{ data
   return rows;
 }
 
+const ANALYSIS_COLUMNS =
+  "id, status, stage, stage_message, error, stage_updated_at, commit_sha, adapter, summary, coverage, skipped, project:projects(name, repository_url, default_branch)";
+
 export async function loadAnalysis(supabase: SupabaseClient, id: string): Promise<AnalysisRow | null> {
   const { data, error } = await supabase
     .from("analyses")
-    .select("id, status, stage, stage_message, error, stage_updated_at, commit_sha, adapter, summary, coverage, skipped, project:projects(name, repository_url, default_branch)")
+    .select(ANALYSIS_COLUMNS)
     .eq("id", id)
     .maybeSingle();
 
@@ -88,6 +91,20 @@ export async function loadAnalysis(supabase: SupabaseClient, id: string): Promis
   // supabase-js types a many-to-one embed as an array; at runtime it's an
   // object, so the boundary cast goes through unknown.
   return (data as unknown as AnalysisRow | null) ?? null;
+}
+
+// The agent-grant read policies return at most the one analysis the token
+// names, so there is no id filter here — the policy is the filter.
+export async function loadGrantedAnalysis(supabase: SupabaseClient): Promise<AnalysisRow | null> {
+  const { data, error } = await supabase.from("analyses").select(ANALYSIS_COLUMNS).limit(2);
+
+  if (error) throw new Error(`Could not load analysis: ${error.message}`);
+  const rows = (data ?? []) as unknown as AnalysisRow[];
+  if (rows.length === 0) return null;
+  // More than one row would mean a grant policy is wrong; fail loudly instead
+  // of picking one.
+  if (rows.length > 1) throw new Error("An agent grant returned more than one analysis");
+  return rows[0];
 }
 
 export async function loadResult(supabase: SupabaseClient, analysis: AnalysisRow): Promise<{ result: ParseResult; modelRoles: Record<string, ModelRole> }> {
